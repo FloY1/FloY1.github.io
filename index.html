@@ -1,0 +1,1569 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="theme-color" content="#07171E">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>Эхолот — карта дна и места</title>
+<style>
+:root{
+  --abyss:#07171E;
+  --deep:#0C232D;
+  --shelf:#11303C;
+  --ridge:#1D4C5B;
+  --foam:#EAF4F3;
+  --mist:#8FB0B6;
+  --lure:#F0B429;
+  --shallow:#4FD1C5;
+  --danger:#E2683F;
+  --font-ui:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --font-num:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  --bar:56px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--abyss);
+  color:var(--foam);
+  font-family:var(--font-ui);
+  font-size:16px;
+  line-height:1.4;
+  overscroll-behavior-y:none;
+}
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:radial-gradient(120% 60% at 50% -10%, rgba(79,209,197,.10), transparent 60%);
+}
+button,input,select,textarea{font:inherit;color:inherit}
+button{background:none;border:0;cursor:pointer}
+:focus-visible{outline:2px solid var(--lure);outline-offset:2px}
+
+/* ---------- Шапка ---------- */
+.bar{
+  position:sticky;top:0;z-index:30;
+  height:calc(var(--bar) + env(safe-area-inset-top));
+  padding-top:env(safe-area-inset-top);
+  display:flex;align-items:center;gap:6px;
+  background:rgba(7,23,30,.88);
+  backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--ridge);
+}
+.bar-btn{
+  width:46px;height:46px;flex:0 0 46px;
+  display:grid;place-items:center;border-radius:12px;color:var(--foam);
+}
+.bar-btn:active{background:rgba(255,255,255,.07)}
+.bar-btn svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+#addBtn{color:var(--lure)}
+.bar-title{
+  flex:1;min-width:0;
+  font-family:var(--font-num);font-size:13px;letter-spacing:.16em;text-transform:uppercase;
+  color:var(--foam);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;
+}
+main{position:relative;z-index:1;padding:14px 14px calc(28px + env(safe-area-inset-bottom));max-width:600px;margin:0 auto}
+
+/* ---------- Типографика ---------- */
+.eyebrow{
+  font-family:var(--font-num);font-size:11px;letter-spacing:.18em;text-transform:uppercase;
+  color:var(--mist);margin:22px 2px 8px;
+}
+.eyebrow:first-child{margin-top:4px}
+h2{font-size:19px;margin:0;font-weight:650;letter-spacing:-.01em}
+.num{font-family:var(--font-num);font-variant-numeric:tabular-nums}
+.muted{color:var(--mist)}
+.tiny{font-size:12.5px}
+
+/* ---------- Панели ---------- */
+.card{
+  background:linear-gradient(180deg,var(--deep),#0A1F27);
+  border:1px solid var(--ridge);border-radius:14px;padding:14px;margin-bottom:10px;
+}
+.place{display:flex;gap:12px;align-items:stretch;width:100%;text-align:left;padding:12px;position:relative}
+.place:active{border-color:var(--shallow)}
+.thumb{
+  width:58px;height:58px;flex:0 0 58px;border-radius:10px;object-fit:cover;
+  background:var(--shelf);border:1px solid var(--ridge);
+}
+.thumb.ph{display:grid;place-items:center;color:var(--ridge);font-family:var(--font-num);font-size:20px}
+.dirbadge{width:58px;height:58px;flex:0 0 58px;border-radius:50%;position:relative;
+  background:radial-gradient(circle at 50% 45%, #0f2c38, #081d25);border:1px solid var(--ridge);
+  display:grid;place-items:center}
+.dirbadge.big{width:66px;height:66px;flex:0 0 66px}
+.dirbadge .deg{font-size:12px;color:var(--foam);position:relative;z-index:1}
+.dirbadge .q{font-size:19px;color:var(--ridge);font-family:var(--font-num)}
+.dirbadge .needle{position:absolute;inset:0;border-radius:50%}
+.dirbadge .needle::before{content:"";position:absolute;left:50%;top:5px;width:0;height:0;margin-left:-4px;
+  border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:11px solid var(--lure)}
+.dirbadge::after{content:"С";position:absolute;top:2px;left:50%;transform:translateX(-50%);
+  font-family:var(--font-num);font-size:8px;color:var(--mist);opacity:.55}
+.place-main{flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center;gap:3px}
+.place-name{font-weight:650;font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.place-meta{font-size:12.5px;color:var(--mist);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.spark{width:100%;height:34px;display:block;margin-top:8px;border-radius:6px}
+
+/* ---------- Кнопки ---------- */
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  height:48px;padding:0 18px;border-radius:12px;font-weight:600;font-size:15.5px;
+  border:1px solid var(--ridge);background:var(--shelf);color:var(--foam);
+}
+.btn:active{transform:translateY(1px)}
+.btn.primary{background:var(--lure);color:#231903;border-color:var(--lure)}
+.btn.ghost{background:transparent}
+.btn.danger{color:var(--danger);border-color:rgba(226,104,63,.4)}
+.btn.wide{width:100%}
+.btn.sm{height:38px;padding:0 12px;font-size:14px;border-radius:10px}
+.row{display:flex;gap:8px}
+.row>*{flex:1}
+
+/* ---------- Поля ---------- */
+label.f{display:block;margin-bottom:10px}
+label.f>span{
+  display:block;font-family:var(--font-num);font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--mist);margin-bottom:5px;
+}
+input[type=text],input[type=number],textarea,select{
+  width:100%;height:48px;padding:0 12px;border-radius:11px;
+  background:#081D25;border:1px solid var(--ridge);color:var(--foam);
+  font-family:var(--font-num);font-size:16px;appearance:none;
+}
+textarea{height:84px;padding:11px 12px;font-family:var(--font-ui);resize:vertical}
+select{background-image:linear-gradient(45deg,transparent 50%,var(--mist) 50%),linear-gradient(135deg,var(--mist) 50%,transparent 50%);
+  background-position:calc(100% - 18px) 21px,calc(100% - 12px) 21px;background-size:6px 6px;background-repeat:no-repeat}
+input:focus,textarea:focus,select:focus{border-color:var(--shallow);outline:none}
+input[type=file]{display:none}
+
+/* ---------- Быстрая запись замера ---------- */
+.quick{display:flex;gap:8px;align-items:flex-end}
+.castrow{display:flex;gap:10px;align-items:flex-end;padding-bottom:11px;border-bottom:1px solid var(--ridge)}
+.castrow .btn{flex:0 0 auto}
+.quick label.f{flex:1;margin-bottom:0}
+.quick .btn{flex:0 0 52px;padding:0;font-size:24px;line-height:1}
+
+/* ---------- Список замеров ---------- */
+.mrow{
+  display:flex;align-items:center;gap:10px;padding:11px 12px;
+  border:1px solid var(--ridge);border-radius:12px;margin-bottom:8px;background:var(--deep);
+}
+.mrow .idx{font-family:var(--font-num);font-size:11px;color:var(--ridge);width:22px;flex:0 0 22px}
+.mrow .val{font-family:var(--font-num);font-size:17px;font-variant-numeric:tabular-nums}
+.mrow .val small{font-size:11px;color:var(--mist);letter-spacing:.1em;margin-left:3px}
+.mrow .grow{flex:1;display:flex;gap:14px;align-items:baseline;flex-wrap:wrap}
+.icobtn{width:36px;height:36px;flex:0 0 36px;display:grid;place-items:center;border-radius:9px;color:var(--mist)}
+.icobtn:active{background:rgba(255,255,255,.07)}
+.icobtn.on{color:var(--lure);background:rgba(240,180,41,.14)}
+.icobtn svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.mrow.edit{flex-wrap:wrap}
+.mrow.edit input{height:42px}
+
+/* ---------- Карта дна ---------- */
+.chartwrap{border:1px solid var(--ridge);border-radius:14px;overflow:hidden;background:#061219}
+#chart{display:block;width:100%;height:340px}
+#topmap{display:block;width:100%;height:380px;touch-action:none}
+.zoombar{position:absolute;top:54px;right:8px;z-index:2;display:flex;flex-direction:column;gap:6px}
+.zoombar button{width:38px;height:38px;border-radius:10px;background:rgba(7,23,30,.72);
+  border:1px solid var(--ridge);color:var(--foam);font-size:17px;line-height:1}
+.chartwrap{position:relative}
+.chartwrap.full{position:fixed;inset:0;z-index:70;border-radius:0;border:0;display:flex;flex-direction:column;justify-content:center;background:#061219}
+.fsbtn{position:absolute;top:8px;right:8px;width:38px;height:38px;border-radius:10px;z-index:2;
+  background:rgba(7,23,30,.72);border:1px solid var(--ridge);color:var(--foam);font-size:16px;line-height:1}
+.tinfo{padding:9px 12px;border-top:1px solid var(--ridge);font-size:13px;color:var(--mist);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tinfo b{color:var(--foam)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;padding:10px 12px;border-top:1px solid var(--ridge);
+  font-family:var(--font-num);font-size:11px;letter-spacing:.08em;color:var(--mist);text-transform:uppercase}
+.legend b{color:var(--foam);font-weight:600}
+.switch{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px}
+.toggle{position:relative;width:50px;height:29px;flex:0 0 50px;border-radius:20px;background:var(--shelf);border:1px solid var(--ridge);transition:.18s}
+.toggle::after{content:"";position:absolute;top:3px;left:3px;width:21px;height:21px;border-radius:50%;background:var(--mist);transition:.18s}
+.toggle[aria-pressed=true]{background:rgba(240,180,41,.22);border-color:var(--lure)}
+.toggle[aria-pressed=true]::after{left:24px;background:var(--lure)}
+
+/* ---------- Показания катушки ---------- */
+.readout{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--ridge);border:1px solid var(--ridge);border-radius:14px;overflow:hidden}
+.readout div{background:#081D25;padding:13px 14px}
+.readout .k{font-family:var(--font-num);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--mist)}
+.readout .v{font-family:var(--font-num);font-size:22px;margin-top:3px;font-variant-numeric:tabular-nums}
+.readout .v.big{font-size:30px;color:var(--lure)}
+.readout .span2{grid-column:1/-1}
+
+.chip.sel{border-color:var(--shallow);background:rgba(79,209,197,.14)}
+.chip.step{padding:0 14px;font-family:var(--font-num);color:var(--shallow)}
+.chip.bch,.chip.mch,.chip.ebch,.chip.emch{padding:0 13px 0 10px;height:36px;font-size:14px;gap:7px}
+.sw{width:11px;height:11px;border-radius:3px;display:inline-block;flex:0 0 11px;border:1px solid rgba(0,0,0,.35)}
+.mi{font-size:13px;color:var(--shallow);width:14px;text-align:center}
+.sub{font-family:var(--font-num);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mist);margin:14px 2px 7px}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+.chip{display:inline-flex;align-items:center;gap:8px;height:38px;padding:0 6px 0 13px;border-radius:19px;
+  border:1px solid var(--ridge);background:var(--deep);font-size:14px}
+.chip.on{border-color:var(--lure);background:rgba(240,180,41,.12)}
+.chip .x{width:26px;height:26px;display:grid;place-items:center;border-radius:50%;color:var(--mist);font-size:17px}
+
+/* ---------- Меню ---------- */
+#scrim{position:fixed;inset:0;background:rgba(2,10,14,.6);z-index:40;opacity:0;pointer-events:none;transition:opacity .2s}
+#scrim.on{opacity:1;pointer-events:auto}
+#drawer{
+  position:fixed;top:0;left:0;bottom:0;width:276px;max-width:82vw;z-index:50;
+  background:var(--deep);border-right:1px solid var(--ridge);
+  transform:translateX(-102%);transition:transform .22s ease;
+  padding:calc(18px + env(safe-area-inset-top)) 14px 18px;
+  display:flex;flex-direction:column;gap:6px;
+}
+#drawer.on{transform:none}
+.brand{font-family:var(--font-num);font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--lure);margin:2px 6px 16px}
+.mitem{display:flex;align-items:center;gap:12px;padding:13px 12px;border-radius:11px;width:100%;text-align:left;font-size:15.5px}
+.mitem:active,.mitem.on{background:var(--shelf)}
+.mitem svg{width:19px;height:19px;flex:0 0 19px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--shallow)}
+.drawer-foot{margin-top:auto;font-size:11.5px;color:var(--mist);padding:0 8px;line-height:1.5}
+
+/* ---------- Модалка ---------- */
+#modal{position:fixed;inset:0;z-index:60;display:none;align-items:flex-end;justify-content:center;background:rgba(2,10,14,.65)}
+#modal.on{display:flex}
+.sheet{
+  width:100%;max-width:600px;max-height:92vh;overflow:auto;
+  background:var(--deep);border:1px solid var(--ridge);border-radius:18px 18px 0 0;
+  padding:8px 16px calc(18px + env(safe-area-inset-bottom));
+  animation:up .22s ease;
+}
+@keyframes up{from{transform:translateY(24px);opacity:.4}}
+.grab{width:38px;height:4px;border-radius:3px;background:var(--ridge);margin:6px auto 14px}
+.sheet h2{margin-bottom:14px}
+.photo-prev{width:100%;height:170px;object-fit:cover;border-radius:12px;border:1px solid var(--ridge);margin-bottom:8px}
+
+.empty{text-align:center;padding:40px 16px;color:var(--mist)}
+.empty .big{font-size:34px;margin-bottom:10px;opacity:.5}
+#toast{
+  position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);
+  background:var(--shelf);border:1px solid var(--ridge);color:var(--foam);
+  padding:11px 18px;border-radius:24px;font-size:14px;z-index:80;opacity:0;pointer-events:none;transition:.2s;
+}
+#toast.on{opacity:1;transform:translateX(-50%)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <button class="bar-btn" id="leftBtn" aria-label="Меню">
+    <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
+  </button>
+  <div class="bar-title" id="barTitle">Мои места</div>
+  <button class="bar-btn" id="addBtn" aria-label="Добавить">
+    <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+</header>
+
+<main id="view"></main>
+
+<div id="scrim"></div>
+<aside id="drawer">
+  <div class="brand">Эхолот</div>
+  <button class="mitem" data-nav="places"><svg viewBox="0 0 24 24"><path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>Мои места</button>
+  <button class="mitem" data-nav="reel"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.6"/><path d="M12 4v3M12 17v3M4 12h3M17 12h3"/></svg>Калькулятор катушки</button>
+  <button class="mitem" id="demoBtn"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg>Убрать демо-места</button>
+  <button class="mitem" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg>Сохранить копию</button>
+  <button class="mitem" id="importBtn"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4M4 17v3h16v-3"/></svg>Загрузить копию</button>
+  <input type="file" id="importFile" accept="application/json,.json">
+  <div class="drawer-foot">Данные хранятся только в этом телефоне.<br>Интернет не нужен.</div>
+</aside>
+
+<div id="modal"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ============================================================
+   ХРАНИЛИЩЕ  (localStorage; запасной вариант — window.storage)
+   ============================================================ */
+const KEY = "fishmap.db.v1";
+const LS = (() => { try { localStorage.setItem("__t","1"); localStorage.removeItem("__t"); return localStorage; } catch(e){ return null; } })();
+
+async function rawGet(){
+  if (LS) return LS.getItem(KEY);
+  if (window.storage) { try { const r = await window.storage.get(KEY); return r ? r.value : null; } catch(e){ return null; } }
+  return null;
+}
+async function rawSet(v){
+  if (LS) { try { LS.setItem(KEY, v); return true; } catch(e){ toast("Память телефона переполнена — удалите старые фото"); return false; } }
+  if (window.storage) { try { await window.storage.set(KEY, v); return true; } catch(e){ return false; } }
+  return false;
+}
+
+let DB = { places: [], reel: null, presets: [], activePreset: null, chartMeters: false };
+let saveTimer = null;
+function save(){ clearTimeout(saveTimer); saveTimer = setTimeout(()=>rawSet(JSON.stringify(DB)), 120); }
+function normalizeDB(){
+  if (!DB.reel) DB.reel = { size:"3000", core:36, width:15, ratio:5.2, lineD:0.25, lineL:150 };
+  if (!DB.reel.ratio) DB.reel.ratio = 5.2;
+  if (!Array.isArray(DB.places)) DB.places = [];
+  if (!Array.isArray(DB.presets)) DB.presets = [];
+  DB.places.forEach(p => {
+    if (!Array.isArray(p.lines)){
+      p.lines = [{ id: uid(), name: "Луч 1", az: null, cast: p.cast||null, measures: p.measures||[] }];
+      delete p.measures; delete p.cast;
+    }
+  });
+}
+async function load(){
+  const raw = await rawGet();
+  if (raw) { try { DB = Object.assign(DB, JSON.parse(raw)); } catch(e){} }
+  normalizeDB();
+  if (!raw) seedDemo();
+  else if (DB.demoV !== 4 && DB.places.some(p => p.demo)) seedDemo();
+}
+
+/* ---- Демо-места (создаются только при первом открытии) ---- */
+function demoPhoto(top, bottom, sun){
+  const c = document.createElement("canvas"); c.width = 320; c.height = 240;
+  const g = c.getContext("2d");
+  const sky = g.createLinearGradient(0,0,0,140);
+  sky.addColorStop(0, top); sky.addColorStop(1, bottom);
+  g.fillStyle = sky; g.fillRect(0,0,320,140);
+  g.fillStyle = sun; g.beginPath(); g.arc(232, 96, 26, 0, 7); g.fill();
+  const wat = g.createLinearGradient(0,140,0,240);
+  wat.addColorStop(0, bottom); wat.addColorStop(1, "#08202b");
+  g.fillStyle = wat; g.fillRect(0,140,320,100);
+  g.strokeStyle = "rgba(255,255,255,.16)"; g.lineWidth = 1.5;
+  for (let i = 0; i < 9; i++){
+    const y = 150 + i*10;
+    g.beginPath(); g.moveTo(20 + i*6, y); g.lineTo(300 - i*5, y); g.stroke();
+  }
+  g.strokeStyle = "#0a2a22"; g.lineWidth = 3;
+  for (let i = 0; i < 14; i++){
+    const x = 6 + i*8 + (i%3)*4;
+    g.beginPath(); g.moveTo(x, 240); g.quadraticCurveTo(x-6, 190, x-11, 148); g.stroke();
+  }
+  return c.toDataURL("image/jpeg", 0.7);
+}
+function seedDemo(){
+  const mk = arr => arr.map(a => ({ id: uid(), turns: a[0], count: a[1], bottom: a[2]||null, mark: a[3]||null, note: a[4]||"", clip: !!a[5] }));
+  const line = (name, az, cast, arr) => ({ id: uid(), name, az, cast, measures: mk(arr) });
+  const demo = [
+    { id: uid(), demo: true, name: "Затока за вербою", coords: "49.84210, 24.03150",
+      comment: "Заход с левого берега, ветер в спину. Первая бровка на 25 оборотах, дальше стол и яма под тем берегом.",
+      photo: demoPhoto("#123a4d", "#2a6478", "#f0b429"),
+      created: Date.now(),
+      lines: [
+        line("На вербу", 318, 80, [
+          [80,17,"clay"],[70,21,"il","snag","коряга, рвал поводок"],[60,24,"il"],[55,25,"shell"],
+          [50,26,"shell","spot","клипсуюсь сюда",true],[45,22,"shell"],[40,18,"sand","feed","бью кормушкой"],
+          [35,19,"sand"],[30,18,"clay"],[25,14,"clay",null,"свал начался",true],[20,9,"il"],[15,8,"il"],[10,5,"weed"],[5,3,"weed"]
+        ]),
+        line("Прямо на буй", 345, 70, [
+          [70,23,"il"],[62,25,"il","spot","держу тут ночью",true],[54,24,"shell"],[46,20,"shell"],
+          [38,16,"sand"],[30,13,"clay"],[22,11,"clay"],[14,7,"weed"],[6,4,"weed"]
+        ]),
+        line("Вдоль камыша", 22, 60, [
+          [60,12,"weed"],[52,13,"il"],[44,15,"il"],[36,16,"il","q","мягко, проверить"],
+          [28,14,"clay"],[20,10,"stone"],[12,7,"stone","snag"],[6,4,"weed"]
+        ])
+      ] },
+    { id: uid(), demo: true, name: "Коса на Днестре", coords: "48.51940, 26.62580",
+      comment: "Ракушка с 40 оборотов, поводки рвёт. Кормить точно, течение сносит вправо.",
+      photo: demoPhoto("#3d2b1f", "#6b5233", "#ffd27a"),
+      created: Date.now() - 864e5,
+      lines: [
+        line("На косу", 205, 80, [
+          [80,19,"sand"],[72,26,"clay","q","проверить в след. раз"],[64,30,"il"],
+          [56,31,"il","spot","самая яма",true],[48,28,"shell"],[40,20,"shell","feed"],
+          [32,11,"stone",null,"стучит"],[24,7,"stone"],[16,7,"sand"],[8,6,"sand"]
+        ]),
+        line("Против течения", 240, 75, [
+          [75,22,"stone"],[65,24,"stone"],[55,27,"shell"],[45,29,"shell","spot",null,true],
+          [35,24,"il"],[25,15,"clay"],[15,9,"sand"],[7,6,"sand"]
+        ])
+      ] }
+  ];
+  DB.places = demo.concat(DB.places.filter(p => !p.demo));
+  DB.demoV = 4;
+  if (!DB.presets.some(p => p.id === "demo-preset"))
+    DB.presets.push({ id: "demo-preset", name: "Демо: 3000 + 0.25", data: { ...DB.reel } });
+  save();
+}
+
+/* ============================================================
+   МЕЛОЧИ
+   ============================================================ */
+const $ = s => document.querySelector(s);
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = v => { const n = parseFloat(String(v).replace(",",".")); return isFinite(n) ? n : 0; };
+const fmt = (n,d=1) => (Math.round(n*10**d)/10**d).toLocaleString("ru-RU");
+const inputFmt = (n,d=1) => String(Math.round(n*10**d)/10**d);
+
+let toastTimer;
+function toast(msg){
+  const t = $("#toast"); t.textContent = msg; t.classList.add("on");
+  clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove("on"), 2200);
+}
+function findPlace(id){ return DB.places.find(p => p.id === id); }
+
+/* ---- Дно и метки ---- */
+const BOTTOM = [
+  { k:"il",    n:"Ил",      c:"#2F5D50" },
+  { k:"sand",  n:"Песок",   c:"#E3D2A2" },
+  { k:"clay",  n:"Глина",   c:"#A97142" },
+  { k:"shell", n:"Ракушка", c:"#F0B429" },
+  { k:"stone", n:"Камни",   c:"#93A3AB" },
+  { k:"weed",  n:"Трава",   c:"#4FAE55" }
+];
+const MARKS = [
+  { k:"snag", n:"Коряга",      i:"✕" },
+  { k:"spot", n:"Точка ловли", i:"◎" },
+  { k:"feed", n:"Прикормка",   i:"◆" },
+  { k:"q",    n:"Вопрос",      i:"?" }
+];
+const BOT = k => BOTTOM.find(b => b.k === k);
+const MRK = k => MARKS.find(m => m.k === k);
+const DEFCOL = "#F0B429";
+
+/* ============================================================
+   МАТЕМАТИКА КАТУШКИ
+   Леска ложится слоями. В слое помещается (ширина шпули / диаметр
+   лески) витков, каждый следующий слой шире на два диаметра лески.
+   Длина витка = π × текущий диаметр намотки.
+   ============================================================ */
+const SPOOLS = {
+  "1000":[30,13], "1500":[31,13], "2000":[32,14], "2500":[34,14], "3000":[36,15],
+  "3500":[37,15], "4000":[38,16], "4500":[40,17], "5000":[41,17], "6000":[44,18],
+  "8000":[47,20], "10000":[50,22]
+};
+function spoolOK(s){ return s.core>0 && s.width>0 && s.lineD>0.01; }
+function perLayer(s){ return Math.max(1, Math.floor(s.width / s.lineD)); }
+
+function turnsForLength(L, s){          // сколько витков займёт L метров, считая от пустой шпули
+  if (!spoolOK(s) || L <= 0) return 0;
+  const N = perLayer(s); let rem = L, turns = 0, k = 0;
+  while (rem > 0 && k < 600){
+    const D = (s.core + (2*k+1)*s.lineD)/1000;
+    const layer = Math.PI * D * N;
+    if (rem >= layer){ turns += N; rem -= layer; k++; }
+    else { turns += rem / (Math.PI*D); rem = 0; }
+  }
+  return turns;
+}
+function lengthForTurns(T, s){          // сколько метров лески в T витках от пустой шпули
+  if (!spoolOK(s) || T <= 0) return 0;
+  const N = perLayer(s); let rem = T, len = 0, k = 0;
+  while (rem > 0 && k < 600){
+    const D = (s.core + (2*k+1)*s.lineD)/1000;
+    if (rem >= N){ len += Math.PI*D*N; rem -= N; k++; }
+    else { len += Math.PI*D*rem; rem = 0; }
+  }
+  return len;
+}
+// Обороты РУЧКИ: за один оборот ручки ротор делает «передаточное число» витков
+function ratio(s){ return s.ratio > 0 ? s.ratio : 1; }
+function metersToTurns(x, s){
+  const L = s.lineL; if (x <= 0) return 0; if (x > L) x = L;
+  return (turnsForLength(L, s) - turnsForLength(L - x, s)) / ratio(s);
+}
+function turnsToMeters(t, s){
+  const L = s.lineL, Tf = turnsForLength(L, s);
+  let rt = t * ratio(s); if (rt <= 0) return 0; if (rt > Tf) rt = Tf;
+  return L - lengthForTurns(Tf - rt, s);
+}
+function handleTurns(s){ return turnsForLength(s.lineL, s) / ratio(s); }
+function activeSpool(){
+  if (DB.activePreset){ const p = DB.presets.find(p=>p.id===DB.activePreset); if (p) return p.data; }
+  return DB.reel;
+}
+
+/* ============================================================
+   НАВИГАЦИЯ
+   ============================================================ */
+let route = { view:"places", id:null, lid:null };
+let viewCleanup = null;
+function go(view, id, lid){ route = { view, id: id||null, lid: lid||null }; render(); window.scrollTo(0,0); closeDrawer(); }
+function findLine(p, lid){ return (p.lines||[]).find(l => l.id === lid); }
+
+const ICON_MENU = '<path d="M3 6h18M3 12h18M3 18h18"/>';
+const ICON_BACK = '<path d="M15 5l-7 7 7 7"/>';
+
+function render(){
+  if (viewCleanup){ viewCleanup(); viewCleanup = null; }
+  const v = $("#view"), left = $("#leftBtn"), add = $("#addBtn");
+  const root = route.view === "places";
+  left.querySelector("svg").innerHTML = root ? ICON_MENU : ICON_BACK;
+  left.setAttribute("aria-label", root ? "Меню" : "Назад");
+  add.style.visibility = (route.view === "places" || route.view === "place" || route.view === "line") ? "visible" : "hidden";
+
+  const p = route.id ? findPlace(route.id) : null;
+  if (route.view !== "places" && route.view !== "reel" && !p) return go("places");
+
+  if (route.view === "places"){ $("#barTitle").textContent = "Мои места"; v.innerHTML = viewPlaces(); afterPlaces(); }
+  else if (route.view === "place"){ $("#barTitle").textContent = p.name; v.innerHTML = viewPlace(p); afterPlace(p); }
+  else if (route.view === "line"){ const l = findLine(p, route.lid); if(!l) return go("place", p.id);
+    $("#barTitle").textContent = l.name; v.innerHTML = viewLine(p, l); afterLine(p, l); }
+  else if (route.view === "chart"){ const l = findLine(p, route.lid); if(!l) return go("place", p.id);
+    $("#barTitle").textContent = "Профиль: " + l.name; v.innerHTML = viewChart(p, l); afterChart(p, l); }
+  else if (route.view === "top"){ $("#barTitle").textContent = "Вид сверху"; v.innerHTML = viewTop(p); afterTop(p); }
+  else if (route.view === "reel"){ $("#barTitle").textContent = "Калькулятор катушки"; v.innerHTML = viewReel(); afterReel(); }
+}
+function back(){
+  if (route.view === "place") go("places");
+  else if (route.view === "line" || route.view === "top") go("place", route.id);
+  else if (route.view === "chart") go("line", route.id, route.lid);
+  else go("places");
+}
+
+/* ============================================================
+   ЭКРАН: СПИСОК МЕСТ
+   ============================================================ */
+function viewPlaces(){
+  if (!DB.places.length) return `
+    <div class="empty">
+      <div class="big">◎</div>
+      <div style="font-size:17px;color:var(--foam);margin-bottom:6px">Мест пока нет</div>
+      <div class="tiny">Нажмите + вверху справа, чтобы добавить первое место</div>
+    </div>`;
+  return `<div class="eyebrow">Мест: ${DB.places.length}</div>` + DB.places.map(p => {
+    const lines = p.lines || [], total = lines.reduce((n,l) => n + (l.measures||[]).length, 0);
+    const best = lines.slice().sort((a,b)=>(b.measures||[]).length-(a.measures||[]).length)[0];
+    const meta = [ lines.length + " луч." , total + " замер.", p.coords ? esc(p.coords) : "" ].filter(Boolean).join(" · ");
+    return `<button class="card place" data-open="${p.id}">
+      ${ p.photo ? `<img class="thumb" src="${p.photo}" alt="">` : `<div class="thumb ph">◎</div>` }
+      <div class="place-main">
+        <div class="place-name">${esc(p.name)}</div>
+        <div class="place-meta">${meta}</div>
+        ${ best && (best.measures||[]).length>1 ? `<canvas class="spark" data-spark="${p.id}|${best.id}"></canvas>` : "" }
+      </div>
+    </button>`;
+  }).join("");
+}
+function afterPlaces(){
+  document.querySelectorAll("[data-open]").forEach(el => el.onclick = () => go("place", el.dataset.open));
+  document.querySelectorAll("[data-spark]").forEach(c => {
+    const [pid, lid] = c.dataset.spark.split("|");
+    drawSpark(c, findLine(findPlace(pid), lid));
+  });
+}
+
+/* ============================================================
+   ЭКРАН: МЕСТО (замеры)
+   ============================================================ */
+let qBottom = null, qMark = null;
+function lastTurns(l){
+  const m = l.measures || [];
+  return m.length ? m[m.length-1].turns : (l.cast || "");
+}
+function viewPlace(p){
+  const lines = p.lines || [];
+  const ready = lines.filter(l => (l.measures||[]).length >= 2).length;
+  return `
+  <div class="card">
+    <div style="display:flex;gap:12px;align-items:flex-start">
+      ${ p.photo ? `<img class="thumb" src="${p.photo}" alt="" style="width:72px;height:72px;flex:0 0 72px">` : "" }
+      <div style="flex:1;min-width:0">
+        <h2>${esc(p.name)}</h2>
+        ${ p.coords ? `<div class="tiny num muted" style="margin-top:4px">${esc(p.coords)}</div>` : "" }
+        ${ p.comment ? `<div class="tiny" style="margin-top:6px">${esc(p.comment)}</div>` : "" }
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn sm ghost" id="editPlace">Изменить место</button>
+      <button class="btn sm ghost danger" id="delPlace">Удалить</button>
+    </div>
+  </div>
+
+  <div class="eyebrow">Лучи: ${lines.length}</div>
+  ${ lines.length ? lines.map(l => lineCard(l)).join("")
+    : `<div class="empty tiny">Лучей нет. Луч — это одно направление заброса.<br>Нажмите + вверху справа.</div>` }
+
+  <button class="btn ghost wide" id="addLine" style="margin-top:4px">Добавить луч</button>
+  <button class="btn primary wide" id="toTop" style="margin-top:10px;${ready?"":"opacity:.45"}" ${ready?"":"disabled"}>Карта: вид сверху</button>
+  ${ ready ? "" : `<div class="tiny muted" style="text-align:center;margin-top:8px">Нужен хотя бы один луч с двумя замерами</div>` }`;
+}
+function compassBadge(az, big){
+  const size = big ? "big" : "";
+  return `<div class="dirbadge ${size}">
+    ${ az==null ? `<span class="q">?</span>`
+      : `<span class="needle" style="transform:rotate(${az}deg)"></span><span class="deg num">${az}°</span>` }
+  </div>`;
+}
+function lineCard(l){
+  const m = l.measures || [];
+  const meta = [ m.length ? m.length + " замер." : "нет замеров", l.cast ? "заброс " + l.cast + " об." : "" ].filter(Boolean).join(" · ");
+  return `<button class="card place" data-line="${l.id}">
+    ${compassBadge(l.az)}
+    <div class="place-main">
+      <div class="place-name">${esc(l.name)}</div>
+      <div class="place-meta">${meta}</div>
+      ${ m.length>1 ? `<canvas class="spark" data-lspark="${l.id}"></canvas>` : "" }
+    </div>
+  </button>`;
+}
+function afterPlace(p){
+  $("#editPlace").onclick = () => placeSheet(p);
+  $("#delPlace").onclick = () => {
+    if (!confirm("Удалить место «" + p.name + "» со всеми лучами и замерами?")) return;
+    DB.places = DB.places.filter(x => x.id !== p.id); save(); toast("Место удалено"); go("places");
+  };
+  $("#addLine").onclick = () => lineSheet(p, null);
+  $("#toTop").onclick = () => { if (!$("#toTop").disabled) go("top", p.id); };
+  document.querySelectorAll("[data-line]").forEach(el => el.onclick = () => go("line", p.id, el.dataset.line));
+  document.querySelectorAll("[data-lspark]").forEach(c => drawSpark(c, findLine(p, c.dataset.lspark)));
+}
+
+/* ============================================================
+   ЭКРАН: ЛУЧ (замеры протяжки)
+   ============================================================ */
+function viewLine(p, l){
+  const m = (l.measures || []).slice().sort((a,b) => b.turns - a.turns);
+  const clipNo = {};
+  m.filter(x => x.clip).forEach((x,i) => clipNo[x.id] = i+1);
+  return `
+  <div class="card">
+    <div style="display:flex;gap:14px;align-items:center">
+      ${compassBadge(l.az, true)}
+      <div style="flex:1;min-width:0">
+        <h2>${esc(l.name)}</h2>
+        <div class="tiny muted" style="margin-top:3px">${ l.az==null ? "направление не задано" : "азимут " + l.az + "°" }</div>
+      </div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn sm ghost" id="editLine">Изменить луч</button>
+      <button class="btn sm ghost danger" id="delLine">Удалить луч</button>
+    </div>
+  </div>
+
+  <div class="eyebrow">Протяжка</div>
+  <div class="card">
+    <div class="castrow">
+      <label class="f" style="flex:0 0 96px;margin:0"><span>Заброс, об.</span><input type="number" inputmode="decimal" step="1" id="qCast" value="${l.cast||""}" placeholder="80"></label>
+      <button class="btn sm ghost" id="newCast">Новый заброс</button>
+    </div>
+    <div class="quick" style="margin-top:10px">
+      <label class="f"><span>Обороты</span><input type="number" inputmode="decimal" step="1" id="qTurns" value="${lastTurns(l)}"></label>
+      <label class="f"><span>Счёт</span><input type="number" inputmode="decimal" step="0.5" id="qCount" placeholder="0"></label>
+      <button class="btn primary" id="qAdd" aria-label="Записать замер">+</button>
+    </div>
+    <div class="chips" style="margin-top:9px">
+      ${[1,2,3,5].map(s=>`<button class="chip step" data-step="-${s}">−${s}</button>`).join("")}
+      <button class="chip step" data-step="1">+1</button>
+    </div>
+    <div class="sub">Дно</div>
+    <div class="chips">${BOTTOM.map(b=>`<button class="chip bch ${qBottom===b.k?"sel":""}" data-b="${b.k}"><i class="sw" style="background:${b.c}"></i>${b.n}</button>`).join("")}</div>
+    <div class="sub">Метка <span class="muted" style="letter-spacing:0;text-transform:none">— по желанию</span></div>
+    <div class="chips">${MARKS.map(m2=>`<button class="chip mch ${qMark===m2.k?"sel":""}" data-mk="${m2.k}"><i class="mi">${m2.i}</i>${m2.n}</button>`).join("")}</div>
+  </div>
+
+  <div class="eyebrow">Замеры: ${m.length}</div>
+  <div id="mlist">${ m.length ? m.map((x,i)=>mrow(x,i,clipNo[x.id])).join("") : `<div class="empty tiny">Пока пусто. Запишите первый замер выше.</div>` }</div>
+
+  <button class="btn primary wide" id="toChart" style="margin-top:14px;${m.length<2?"opacity:.45":""}" ${m.length<2?"disabled":""}>Профиль дна</button>
+  ${ m.length<2 ? `<div class="tiny muted" style="text-align:center;margin-top:8px">Нужно минимум 2 замера</div>` : "" }`;
+}
+function mrow(x, i, clip){
+  const b = BOT(x.bottom), m = MRK(x.mark);
+  return `<div class="mrow" data-m="${x.id}">
+    <div class="idx num">${String(i+1).padStart(2,"0")}</div>
+    <div class="grow">
+      <div class="val" style="color:var(--shallow)">${fmt(x.turns)}<small>ОБ.</small></div>
+      <div class="val">${fmt(x.count)}<small>СЧЁТ</small></div>
+      ${ b ? `<div class="tiny" style="display:flex;align-items:center;gap:6px"><i class="sw" style="background:${b.c}"></i>${b.n}</div>` : "" }
+      ${ m ? `<div class="tiny muted">${m.i} ${m.n}</div>` : "" }
+      ${ clip ? `<div class="tiny" style="color:var(--lure)">${clip}-я клипса</div>` : "" }
+      ${ x.note ? `<div class="tiny muted">${esc(x.note)}</div>` : "" }
+    </div>
+    <button class="icobtn ${x.clip?"on":""}" data-clip="${x.id}" aria-label="Клипса"><svg viewBox="0 0 24 24"><path d="M16 7v9a4 4 0 0 1-8 0V6a2.5 2.5 0 0 1 5 0v9.5a1 1 0 0 1-2 0V8"/></svg></button>
+    <button class="icobtn" data-edit="${x.id}" aria-label="Изменить"><svg viewBox="0 0 24 24"><path d="M4 20h4L20 8l-4-4L4 16v4z"/></svg></button>
+    <button class="icobtn" data-del="${x.id}" aria-label="Удалить"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg></button>
+  </div>`;
+}
+function afterLine(p, l){
+  $("#editLine").onclick = () => lineSheet(p, l);
+  $("#delLine").onclick = () => {
+    if (!confirm("Удалить луч «" + l.name + "» со всеми замерами?")) return;
+    p.lines = p.lines.filter(x => x.id !== l.id); save(); toast("Луч удалён"); go("place", p.id);
+  };
+  $("#qAdd").onclick = () => {
+    const c = $("#qCount").value, t = $("#qTurns").value;
+    if (c === "" || t === "") return toast("Заполните обороты и счёт");
+    l.measures = l.measures || [];
+    l.measures.push({ id: uid(), count: num(c), turns: num(t), bottom: qBottom, mark: qMark, note: "" });
+    qMark = null;
+    save(); render();
+    const q = $("#qCount"); if (q) q.focus();
+    toast("Записано");
+  };
+  document.querySelectorAll("[data-step]").forEach(b => b.onclick = () => {
+    const f = $("#qTurns");
+    f.value = Math.max(0, num(f.value) + num(b.dataset.step));
+  });
+  $("#qCast").onchange = () => { l.cast = num($("#qCast").value); save(); };
+  $("#newCast").onclick = () => {
+    const c = num($("#qCast").value);
+    if (!c) return toast("Впишите дальность заброса");
+    l.cast = c; save();
+    $("#qTurns").value = c; $("#qCount").value = ""; $("#qCount").focus();
+    toast("Новый заброс: " + c + " об.");
+  };
+  document.querySelectorAll("[data-b]").forEach(b => b.onclick = () => {
+    qBottom = (qBottom === b.dataset.b) ? null : b.dataset.b;
+    document.querySelectorAll(".bch").forEach(x => x.classList.toggle("sel", x.dataset.b === qBottom));
+  });
+  document.querySelectorAll("[data-mk]").forEach(b => b.onclick = () => {
+    qMark = (qMark === b.dataset.mk) ? null : b.dataset.mk;
+    document.querySelectorAll(".mch").forEach(x => x.classList.toggle("sel", x.dataset.mk === qMark));
+  });
+  $("#toChart").onclick = () => { if ((l.measures||[]).length >= 2) go("chart", p.id, l.id); };
+  document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => {
+    l.measures = l.measures.filter(x => x.id !== b.dataset.del); save(); render();
+  });
+  document.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => editRow(l, b.dataset.edit));
+  document.querySelectorAll("[data-clip]").forEach(b => b.onclick = () => {
+    const x = l.measures.find(y => y.id === b.dataset.clip); if (!x) return;
+    x.clip = !x.clip; save(); render();
+    toast(x.clip ? "Клипса поставлена" : "Клипса снята");
+  });
+}
+function editRow(l, id){
+  const x = l.measures.find(m => m.id === id); if (!x) return;
+  const row = document.querySelector('[data-m="'+id+'"]');
+  row.classList.add("edit");
+  row.innerHTML = `
+    <div style="display:flex;gap:8px;width:100%">
+      <label class="f" style="flex:1;margin:0"><span>Обороты</span><input type="number" inputmode="decimal" step="1" id="eT" value="${x.turns}"></label>
+      <label class="f" style="flex:1;margin:0"><span>Счёт</span><input type="number" inputmode="decimal" step="0.5" id="eC" value="${x.count}"></label>
+    </div>
+    <div class="sub">Дно</div>
+    <div class="chips">${BOTTOM.map(b=>`<button class="chip ebch ${x.bottom===b.k?"sel":""}" data-eb="${b.k}"><i class="sw" style="background:${b.c}"></i>${b.n}</button>`).join("")}</div>
+    <div class="sub">Метка</div>
+    <div class="chips">${MARKS.map(m=>`<button class="chip emch ${x.mark===m.k?"sel":""}" data-em="${m.k}"><i class="mi">${m.i}</i>${m.n}</button>`).join("")}</div>
+    <label class="f" style="width:100%;margin:10px 0 0"><span>Заметка</span><input type="text" id="eN" value="${esc(x.note||"")}" placeholder="что запомнить об этой точке"></label>
+    <div class="row" style="width:100%;margin-top:8px">
+      <button class="btn sm ghost" id="eCancel">Отмена</button>
+      <button class="btn sm primary" id="eSave">Сохранить</button>
+    </div>`;
+  let eb = x.bottom || null, em = x.mark || null;
+  row.querySelectorAll("[data-eb]").forEach(b => b.onclick = () => {
+    eb = (eb === b.dataset.eb) ? null : b.dataset.eb;
+    row.querySelectorAll(".ebch").forEach(y => y.classList.toggle("sel", y.dataset.eb === eb));
+  });
+  row.querySelectorAll("[data-em]").forEach(b => b.onclick = () => {
+    em = (em === b.dataset.em) ? null : b.dataset.em;
+    row.querySelectorAll(".emch").forEach(y => y.classList.toggle("sel", y.dataset.em === em));
+  });
+  row.querySelector("#eCancel").onclick = () => render();
+  row.querySelector("#eSave").onclick = () => {
+    x.count = num(row.querySelector("#eC").value);
+    x.turns = num(row.querySelector("#eT").value);
+    x.note  = row.querySelector("#eN").value.trim();
+    x.bottom = eb; x.mark = em;
+    save(); render(); toast("Замер изменён");
+  };
+}
+
+/* ============================================================
+   ЭКРАН: КАРТА ДНА
+   ============================================================ */
+function viewChart(p, l){
+  const s = activeSpool(), can = spoolOK(s);
+  return `
+  <div class="chartwrap">
+    <canvas id="chart"></canvas>
+    <div class="legend" id="legend"></div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:0">
+    <div class="switch">
+      <div><div style="font-size:15px">Дальность в метрах</div>
+        <div class="tiny muted">${ can ? "по катушке: " + esc(s.size) + ", леска " + fmt(s.lineD,2) + " мм" : "заполните калькулятор катушки" }</div></div>
+      <button class="toggle" id="tMeters" aria-pressed="${DB.chartMeters && can}" ${can?"":"disabled"}></button>
+    </div>
+  </div>
+  <button class="btn ghost wide" id="backPlace" style="margin-top:12px">К списку замеров</button>`;
+}
+function afterChart(p, l){
+  const draw = () => drawChart($("#chart"), l);
+  draw();
+  window.addEventListener("resize", draw);
+  viewCleanup = () => window.removeEventListener("resize", draw);
+  $("#tMeters").onclick = e => { DB.chartMeters = !DB.chartMeters; save(); render(); };
+  $("#backPlace").onclick = () => go("line", p.id, l.id);
+}
+
+function chartPoints(l){
+  const s = activeSpool(), toM = DB.chartMeters && spoolOK(s);
+  let pts = (l.measures||[]).map(m => ({
+    x: toM ? turnsToMeters(m.turns, s) : m.turns,
+    y: m.count, note: m.note, turns: m.turns, bottom: m.bottom, mark: m.mark
+  })).sort((a,b) => a.x - b.x);
+  return { pts, unit: toM ? "м" : "об." };
+}
+
+function drawChart(cv, l){
+  const { pts, unit } = chartPoints(l);
+  const w = cv.clientWidth, h = 340, dpr = window.devicePixelRatio || 1;
+  cv.width = w*dpr; cv.height = h*dpr;
+  const g = cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
+  const L = 42, R = 14, T = 24, B = 34;
+  const iw = w - L - R, ih = h - T - B;
+
+  const maxX = Math.max(...pts.map(q=>q.x), 1);
+  const maxY = Math.max(...pts.map(q=>q.y), 1) * 1.15;
+  const X = v => L + (v / maxX) * iw;
+  const Y = v => T + (v / maxY) * ih;
+
+  // вода
+  const wg = g.createLinearGradient(0, T, 0, T+ih);
+  wg.addColorStop(0, "#0d3a4b"); wg.addColorStop(1, "#061c26");
+  g.fillStyle = wg; g.fillRect(L, T, iw, ih);
+
+  // сетка
+  g.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  g.textBaseline = "middle";
+  const stepY = niceStep(maxY, 5);
+  g.setLineDash([2,4]);
+  for (let v = 0; v <= maxY; v += stepY){
+    const y = Y(v);
+    g.strokeStyle = "rgba(143,176,182,.20)"; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(L, y+.5); g.lineTo(L+iw, y+.5); g.stroke();
+    g.fillStyle = "#8FB0B6"; g.textAlign = "right";
+    g.fillText(String(Math.round(v*10)/10), L-8, y);
+  }
+  const stepX = niceStep(maxX, 4);
+  g.textAlign = "center";
+  for (let v = 0; v <= maxX + .001; v += stepX){
+    const x = X(v);
+    g.strokeStyle = "rgba(143,176,182,.13)";
+    g.beginPath(); g.moveTo(x+.5, T); g.lineTo(x+.5, T+ih); g.stroke();
+    g.fillStyle = "#8FB0B6"; g.fillText(String(Math.round(v*10)/10), x, T+ih+14);
+  }
+  g.setLineDash([]);
+
+  // профиль дна: каждый участок красится в цвет своего грунта
+  const P = pts.map(q => ({ x: X(q.x), y: Y(q.y) }));
+  const seg = [];
+  for (let i = 0; i < P.length-1; i++){
+    const p0 = P[i-1]||P[i], p1 = P[i], p2 = P[i+1], p3 = P[i+2]||P[i+1];
+    seg.push({
+      p1, p2,
+      c1: { x: p1.x + (p2.x-p0.x)/6, y: p1.y + (p2.y-p0.y)/6 },
+      c2: { x: p2.x - (p3.x-p1.x)/6, y: p2.y - (p3.y-p1.y)/6 },
+      col: (BOT(pts[i+1].bottom) || BOT(pts[i].bottom) || { c: DEFCOL }).c
+    });
+  }
+  const base = T + ih;
+  seg.forEach(s2 => {
+    const f = new Path2D();
+    f.moveTo(s2.p1.x, s2.p1.y);
+    f.bezierCurveTo(s2.c1.x, s2.c1.y, s2.c2.x, s2.c2.y, s2.p2.x, s2.p2.y);
+    f.lineTo(s2.p2.x, base); f.lineTo(s2.p1.x, base); f.closePath();
+    g.save(); g.globalAlpha = .28; g.fillStyle = s2.col; g.fill(f); g.restore();
+  });
+  g.lineJoin = "round"; g.lineCap = "round"; g.lineWidth = 3;
+  seg.forEach(s2 => {
+    g.strokeStyle = s2.col;
+    g.beginPath(); g.moveTo(s2.p1.x, s2.p1.y);
+    g.bezierCurveTo(s2.c1.x, s2.c1.y, s2.c2.x, s2.c2.y, s2.p2.x, s2.p2.y);
+    g.stroke();
+  });
+
+  // бровка: два самых крутых участка
+  const steps = pts.slice(1).map((q,i) => ({ i: i+1, d: q.y - pts[i].y }));
+  const lim = Math.max(3, maxY*0.14);
+  steps.filter(s3 => Math.abs(s3.d) >= lim).sort((a,b)=>Math.abs(b.d)-Math.abs(a.d)).slice(0,2).forEach(s3 => {
+    const mx = (X(pts[s3.i-1].x)+X(pts[s3.i].x))/2, my = (Y(pts[s3.i-1].y)+Y(pts[s3.i].y))/2;
+    g.fillStyle = "rgba(234,244,243,.85)"; g.textAlign = "center";
+    g.font = '9px ui-monospace, SFMono-Regular, Menlo, monospace';
+    g.fillText(s3.d > 0 ? "БРОВКА ↓" : "ПОДЪЁМ ↑", mx, my + 16);
+  });
+
+  // точки и метки
+  pts.forEach(q => {
+    const x = X(q.x), y = Y(q.y);
+    g.beginPath(); g.arc(x, y, 4.5, 0, 7); g.fillStyle = "#07171E"; g.fill();
+    g.lineWidth = 2; g.strokeStyle = "#4FD1C5"; g.stroke();
+    g.fillStyle = "#EAF4F3"; g.textAlign = "center";
+    g.font = '11px ui-monospace, SFMono-Regular, Menlo, monospace';
+    g.fillText(String(Math.round(q.y*10)/10), x, y - 13);
+    const mk = MRK(q.mark);
+    if (mk){
+      g.beginPath(); g.arc(x, y - 30, 9, 0, 7);
+      g.fillStyle = "#11303C"; g.fill(); g.strokeStyle = "#4FD1C5"; g.lineWidth = 1.4; g.stroke();
+      g.fillStyle = "#EAF4F3"; g.font = '11px system-ui, sans-serif';
+      g.fillText(mk.i, x, y - 26);
+    }
+  });
+
+  // подписи осей
+  g.fillStyle = "#8FB0B6"; g.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  g.textAlign = "left"; g.fillText("СЧЁТ", 4, T-12);
+  g.textAlign = "right"; g.fillText("ДАЛЬНОСТЬ, " + unit.toUpperCase(), w-R, T-12);
+
+  // легенда
+  const ys = pts.map(q=>q.y);
+  const deepest = pts[ys.indexOf(Math.max(...ys))], shallow = pts[ys.indexOf(Math.min(...ys))];
+  const used = BOTTOM.filter(b => pts.some(q => q.bottom === b.k));
+  $("#legend").innerHTML =
+    `<span>Глубже всего <b class="num">${fmt(deepest.y)}</b> на <b class="num">${fmt(deepest.x)} ${unit}</b></span>` +
+    `<span>Мельче всего <b class="num">${fmt(shallow.y)}</b> на <b class="num">${fmt(shallow.x)} ${unit}</b></span>` +
+    (used.length ? `<span style="flex-basis:100%;display:flex;gap:12px;flex-wrap:wrap;padding-top:2px">` +
+      used.map(b=>`<span style="display:flex;align-items:center;gap:6px"><i class="sw" style="background:${b.c}"></i>${b.n}</span>`).join("") + `</span>` : "");
+}
+function niceStep(max, want){
+  const raw = max / want, p = Math.pow(10, Math.floor(Math.log10(raw))), n = raw / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
+}
+function drawSpark(cv, l){
+  if (!l) return;
+  const pts = (l.measures||[]).slice().sort((a,b)=>a.turns-b.turns);
+  if (pts.length < 2) return;
+  const w = cv.clientWidth || 240, h = 34, dpr = window.devicePixelRatio||1;
+  cv.width = w*dpr; cv.height = h*dpr;
+  const g = cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
+  const maxX = Math.max(...pts.map(q=>q.turns),1), maxY = Math.max(...pts.map(q=>q.count),1)*1.2;
+  g.fillStyle = "rgba(13,58,75,.55)"; g.fillRect(0,0,w,h);
+  g.beginPath();
+  pts.forEach((q,i) => { const x = (q.turns/maxX)*w, y = (q.count/maxY)*h; i?g.lineTo(x,y):g.moveTo(x,y); });
+  g.strokeStyle = "rgba(240,180,41,.85)"; g.lineWidth = 1.6; g.stroke();
+  g.lineTo(w,h); g.lineTo(0,h); g.closePath();
+  g.fillStyle = "rgba(240,180,41,.14)"; g.fill();
+}
+
+/* ============================================================
+   ЭКРАН: ВИД СВЕРХУ
+   ============================================================ */
+let topFull = false, topHit = [], topZoom = 1, topPanX = 0, topPanY = 0;
+function viewTop(p){
+  const s = activeSpool(), can = spoolOK(s);
+  return `
+  <div class="chartwrap ${topFull?"full":""}" id="topwrap">
+    <canvas id="topmap"></canvas>
+    <button class="fsbtn" id="tFull" aria-label="Во весь экран">${topFull?"✕":"⤢"}</button>
+    <div class="zoombar">
+      <button id="zIn" aria-label="Приблизить">+</button>
+      <button id="zOut" aria-label="Отдалить">−</button>
+      <button id="zRst" aria-label="Сбросить">⟲</button>
+    </div>
+    <div class="tinfo" id="tinfo">Нажмите на точку, чтобы посмотреть замер. Щипок — зум, палец — сдвиг.</div>
+    <div class="legend" id="tlegend"></div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:0">
+    <div class="switch">
+      <div><div style="font-size:15px">Дальность в метрах</div>
+        <div class="tiny muted">${ can ? "по катушке: " + esc(s.size) + ", леска " + fmt(s.lineD,2) + " мм" : "заполните калькулятор катушки" }</div></div>
+      <button class="toggle" id="tMeters" aria-pressed="${DB.chartMeters && can}" ${can?"":"disabled"}></button>
+    </div>
+  </div>
+  <button class="btn ghost wide" id="backPlace" style="margin-top:12px">К лучам</button>`;
+}
+function afterTop(p){
+  const cv = $("#topmap");
+  let raf = 0;
+  const draw = () => drawTop(cv, p);
+  const redraw = () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); };
+  draw();
+  window.addEventListener("resize", draw);
+  viewCleanup = () => window.removeEventListener("resize", draw);
+
+  const hit = (mx, my) => {
+    let best = null, bd = 28;
+    topHit.forEach(h => { const dd = Math.hypot(h.sx-mx, h.sy-my); if (dd < bd){ bd = dd; best = h; } });
+    $("#tinfo").innerHTML = best
+      ? `<b>${esc(best.line)}</b> · ${fmt(best.d)} ${best.unit} · счёт <b>${fmt(best.y)}</b>${best.bottom?" · "+BOT(best.bottom).n:""}`
+      : "Нажмите на точку, чтобы посмотреть замер. Щипок — зум, палец — сдвиг.";
+  };
+  cv.onclick = e => { const r = cv.getBoundingClientRect(); hit(e.clientX-r.left, e.clientY-r.top); };
+
+  const dist = t => Math.hypot(t[0].clientX-t[1].clientX, t[0].clientY-t[1].clientY);
+  const mid  = t => ({ x:(t[0].clientX+t[1].clientX)/2, y:(t[0].clientY+t[1].clientY)/2 });
+  let mode = null, sD = 0, sZ = 1, sX = 0, sY = 0, pX = 0, pY = 0, moved = 0, t0 = 0;
+  cv.addEventListener("touchstart", e => {
+    if (e.touches.length === 2){
+      mode = "zoom"; sD = dist(e.touches); sZ = topZoom;
+      const m = mid(e.touches); sX = m.x; sY = m.y; pX = topPanX; pY = topPanY;
+    } else if (e.touches.length === 1){
+      mode = "pan"; sX = e.touches[0].clientX; sY = e.touches[0].clientY;
+      pX = topPanX; pY = topPanY; moved = 0; t0 = Date.now();
+    }
+  }, { passive:true });
+  cv.addEventListener("touchmove", e => {
+    if (mode === "zoom" && e.touches.length === 2){
+      const d = dist(e.touches); topZoom = clamp(sZ * d / (sD||1), 1, 8);
+      const m = mid(e.touches); topPanX = pX + (m.x - sX); topPanY = pY + (m.y - sY);
+      e.preventDefault(); redraw();
+    } else if (mode === "pan" && e.touches.length === 1){
+      const dx = e.touches[0].clientX - sX, dy = e.touches[0].clientY - sY;
+      moved = Math.max(moved, Math.hypot(dx, dy));
+      if (moved > 8){ topPanX = pX + dx; topPanY = pY + dy; e.preventDefault(); redraw(); }
+    }
+  }, { passive:false });
+  cv.addEventListener("touchend", e => {
+    if (mode === "pan" && moved < 8 && Date.now() - t0 < 400){
+      const r = cv.getBoundingClientRect(), t = e.changedTouches[0];
+      hit(t.clientX - r.left, t.clientY - r.top);
+    }
+    mode = null;
+  });
+
+  $("#zIn").onclick  = () => { topZoom = clamp(topZoom*1.4, 1, 8); redraw(); };
+  $("#zOut").onclick = () => { topZoom = clamp(topZoom/1.4, 1, 8); if (topZoom === 1){ topPanX = topPanY = 0; } redraw(); };
+  $("#zRst").onclick = () => { topZoom = 1; topPanX = topPanY = 0; redraw(); };
+  $("#tFull").onclick = () => {
+    topFull = !topFull;
+    $("#topwrap").classList.toggle("full", topFull);
+    $("#tFull").textContent = topFull ? "✕" : "⤢";
+    document.body.style.overflow = topFull ? "hidden" : "";
+    setTimeout(draw, 40);
+  };
+  $("#tMeters").onclick = () => { DB.chartMeters = !DB.chartMeters; save(); render(); };
+  $("#backPlace").onclick = () => { document.body.style.overflow = ""; topFull = false; go("place", p.id); };
+}
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+function meanAngle(arr){
+  const x = arr.reduce((s,a)=>s+Math.cos(a*Math.PI/180),0), y = arr.reduce((s,a)=>s+Math.sin(a*Math.PI/180),0);
+  return (Math.atan2(y,x)*180/Math.PI + 360) % 360;
+}
+function angDiff(a,b){ return ((a-b+540)%360)-180; }
+
+/* цветовая шкала глубины: мель → яма */
+const RAMP = [[0,251,239,176],[.35,111,209,168],[.65,46,159,196],[1,31,63,143]];
+function rampRGB(t){
+  t = clamp(t,0,1);
+  for (let i = 0; i < RAMP.length-1; i++){
+    const a = RAMP[i], b = RAMP[i+1];
+    if (t <= b[0]){
+      const k = (t-a[0])/(b[0]-a[0]||1);
+      return [a[1]+(b[1]-a[1])*k, a[2]+(b[2]-a[2])*k, a[3]+(b[3]-a[3])*k].map(Math.round);
+    }
+  }
+  return [31,63,143];
+}
+const rampCSS = t => { const c = rampRGB(t); return `rgb(${c[0]},${c[1]},${c[2]})`; };
+const EDGE = 9;   // на сколько градусов заливка выходит за крайние лучи
+
+function drawTop(cv, p){
+  const sp = activeSpool(), toM = DB.chartMeters && spoolOK(sp);
+  const lines = (p.lines||[]).filter(l => (l.measures||[]).length);
+  const w = cv.clientWidth || 320;
+  const dpr = window.devicePixelRatio || 1;
+  const g0 = cv.getContext("2d");
+  topHit = [];
+  if (!lines.length){
+    cv.style.height = "200px"; cv.width = w*dpr; cv.height = 200*dpr;
+    g0.setTransform(dpr,0,0,dpr,0,0); g0.fillStyle = "#061219"; g0.fillRect(0,0,w,200);
+    $("#tlegend").innerHTML = "<span>Нет замеров</span>"; return;
+  }
+
+  const known = lines.filter(l => l.az != null).map(l => l.az);
+  const mean = known.length ? meanAngle(known) : null;
+  const rays = lines.map((l,i) => ({
+    name: l.name, az: l.az,
+    rel: (l.az != null && mean != null) ? clamp(angDiff(l.az, mean), -85, 85) : (i - (lines.length-1)/2) * 18,
+    pts: (l.measures||[]).map(m => ({
+      d: toM ? turnsToMeters(m.turns, sp) : m.turns, y: m.count, bottom: m.bottom, mark: m.mark
+    })).sort((a,b) => a.d - b.d)
+  })).sort((a,b) => a.rel - b.rel);
+
+  const flat = rays.flatMap(r => r.pts);
+  const maxD = Math.max(1, ...flat.map(q => q.d));
+  const ys = flat.map(q => q.y), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const unit = toM ? "м" : "об.";
+
+  // --- геометрия: веер растягивается на всю ширину, высота подгоняется под него ---
+  const rad = a => a*Math.PI/180;
+  const lo = rays[0].rel - EDGE, hi = rays[rays.length-1].rel + EDGE;
+  let minS = 1, maxS = -1, maxC = 0;
+  for (let a = lo; a <= hi + .001; a += 1){
+    minS = Math.min(minS, Math.sin(rad(a))); maxS = Math.max(maxS, Math.sin(rad(a)));
+    maxC = Math.max(maxC, Math.cos(rad(a)));
+  }
+  const padX = 30, padTop = 30, padBot = 40;
+  const Rw = (w - 2*padX) / Math.max(.25, maxS - minS);
+  const fit = Math.round(padTop + Rw*Math.max(.35, maxC) + padBot);
+  const h = clamp(fit, 300, topFull ? Math.max(360, window.innerHeight - 120) : 460);
+  const R0 = Math.min(Rw, (h - padTop - padBot) / Math.max(.35, maxC));
+  const R = R0 * topZoom;
+
+  cv.style.height = h + "px"; cv.width = w*dpr; cv.height = h*dpr;
+  const g = cv.getContext("2d"); g.setTransform(dpr,0,0,dpr,0,0);
+  g.fillStyle = "#061219"; g.fillRect(0,0,w,h);
+
+  const cx = (w - R*(maxS + minS))/2 + topPanX;
+  const cy = h - padBot + topPanY;
+  const mono = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+
+  const sampleRay = (r, d) => {
+    const q = r.pts; if (!q.length) return null;
+    if (d <= q[0].d) return q[0].y;
+    if (d > q[q.length-1].d) return null;
+    for (let i = 0; i < q.length-1; i++)
+      if (d <= q[i+1].d){
+        const k = (d - q[i].d) / ((q[i+1].d - q[i].d) || 1);
+        return q[i].y + (q[i+1].y - q[i].y)*k;
+      }
+    return null;
+  };
+  const depthAt = (ang, d) => {
+    if (ang < lo || ang > hi) return null;
+    if (ang <= rays[0].rel) return sampleRay(rays[0], d);
+    if (ang >= rays[rays.length-1].rel) return sampleRay(rays[rays.length-1], d);
+    for (let i = 0; i < rays.length-1; i++){
+      if (ang <= rays[i+1].rel){
+        const v1 = sampleRay(rays[i], d), v2 = sampleRay(rays[i+1], d);
+        if (v1 == null && v2 == null) return null;
+        if (v1 == null) return v2;
+        if (v2 == null) return v1;
+        const k = (ang - rays[i].rel) / ((rays[i+1].rel - rays[i].rel) || 1);
+        return v1 + (v2 - v1)*k;
+      }
+    }
+    return null;
+  };
+
+  // --- поле глубины ---
+  const CELL = 3, SW = Math.ceil(w/CELL), SH = Math.ceil(h/CELL);
+  const grid = new Float64Array(SW*SH).fill(NaN);
+  const off = document.createElement("canvas"); off.width = SW; off.height = SH;
+  const og = off.getContext("2d"), img = og.createImageData(SW, SH);
+  for (let yy = 0; yy < SH; yy++){
+    for (let xx = 0; xx < SW; xx++){
+      const px = xx*CELL + CELL/2, py = yy*CELL + CELL/2;
+      const dx = px - cx, dy = cy - py;
+      const r = Math.hypot(dx, dy);
+      if (r > R || dy < -2) continue;
+      const v = depthAt(Math.atan2(dx, dy)*180/Math.PI, r/R*maxD);
+      if (v == null) continue;
+      grid[yy*SW+xx] = v;
+      const c = rampRGB((v - minY) / ((maxY - minY) || 1));
+      const o = (yy*SW+xx)*4;
+      img.data[o] = c[0]; img.data[o+1] = c[1]; img.data[o+2] = c[2]; img.data[o+3] = 235;
+    }
+  }
+  og.putImageData(img, 0, 0);
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = "high";
+  g.drawImage(off, 0, 0, w, h);
+
+  // --- изолинии ---
+  const gx = i => i*CELL + CELL/2, gy = j => j*CELL + CELL/2;
+  const step = niceStep(Math.max(1, maxY-minY), 5);
+  g.lineWidth = 1.1; g.font = mono;
+  for (let lv = Math.ceil(minY/step)*step; lv < maxY; lv += step){
+    g.strokeStyle = "rgba(255,255,255,.36)";
+    g.beginPath();
+    let label = null;
+    for (let j = 0; j < SH-1; j++){
+      for (let i = 0; i < SW-1; i++){
+        const a = grid[j*SW+i], b = grid[j*SW+i+1], c = grid[(j+1)*SW+i+1], d = grid[(j+1)*SW+i];
+        if (isNaN(a)||isNaN(b)||isNaN(c)||isNaN(d)) continue;
+        const t = (v1,v2) => (lv - v1)/((v2 - v1) || 1);
+        const pp = [];
+        if ((a<lv) !== (b<lv)) pp.push({ x: gx(i) + CELL*t(a,b), y: gy(j) });
+        if ((b<lv) !== (c<lv)) pp.push({ x: gx(i+1), y: gy(j) + CELL*t(b,c) });
+        if ((d<lv) !== (c<lv)) pp.push({ x: gx(i) + CELL*t(d,c), y: gy(j+1) });
+        if ((a<lv) !== (d<lv)) pp.push({ x: gx(i), y: gy(j) + CELL*t(a,d) });
+        if (pp.length >= 2){
+          g.moveTo(pp[0].x, pp[0].y); g.lineTo(pp[1].x, pp[1].y);
+          if (!label || pp[0].x < label.x) label = pp[0];
+        }
+      }
+    }
+    g.stroke();
+    if (label){
+      const txt = String(Math.round(lv*10)/10);
+      g.textAlign = "center"; g.lineWidth = 3; g.strokeStyle = "rgba(6,18,25,.9)";
+      g.strokeText(txt, label.x, label.y - 3);
+      g.fillStyle = "#EAF4F3"; g.fillText(txt, label.x, label.y - 3);
+      g.lineWidth = 1.1;
+    }
+  }
+
+  // --- лучи, точки, метки ---
+  const labels = [];
+  rays.forEach(r => {
+    const a = rad(r.rel);
+    const px = d => cx + R*(d/maxD)*Math.sin(a), py = d => cy - R*(d/maxD)*Math.cos(a);
+    const far = r.pts[r.pts.length-1].d;
+    g.setLineDash([3,4]); g.strokeStyle = "rgba(255,255,255,.45)"; g.lineWidth = 1;
+    g.beginPath(); g.moveTo(cx, cy); g.lineTo(px(far), py(far)); g.stroke();
+    g.setLineDash([]);
+    r.pts.forEach(q => {
+      const x = px(q.d), y = py(q.d);
+      if (x < -20 || x > w+20 || y < -20 || y > h+20) return;
+      g.beginPath(); g.arc(x, y, 4, 0, 7);
+      g.fillStyle = (BOT(q.bottom) || { c:"#EAF4F3" }).c; g.fill();
+      g.strokeStyle = "rgba(6,18,25,.8)"; g.lineWidth = 1.3; g.stroke();
+      topHit.push({ sx: x, sy: y, d: q.d, y: q.y, bottom: q.bottom, line: r.name, unit });
+      const mk = MRK(q.mark);
+      if (mk){
+        g.beginPath(); g.arc(x + 9, y - 9, 6.5, 0, 7);
+        g.fillStyle = "rgba(7,23,30,.9)"; g.fill();
+        g.strokeStyle = "rgba(234,244,243,.7)"; g.lineWidth = 1; g.stroke();
+        g.fillStyle = "#EAF4F3"; g.font = '9px system-ui, sans-serif'; g.textAlign = "center";
+        g.fillText(mk.i, x + 9, y - 5.8);
+        g.font = mono;
+      }
+    });
+    const ex = px(far), ey = py(far);
+    labels.push({
+      x: clamp(ex, 46, w-46), y: clamp(ey - 12, 14, h-14),
+      align: r.rel < -25 ? "left" : r.rel > 25 ? "right" : "center",
+      text: (r.name.length > 13 ? r.name.slice(0,12)+"…" : r.name) + (r.az != null ? " " + r.az + "°" : "")
+    });
+  });
+
+  // подписи лучей: разводим, чтобы не наезжали друг на друга
+  g.font = mono;
+  const placed = [];
+  labels.sort((a,b) => a.y - b.y).forEach(L => {
+    const wd = g.measureText(L.text).width;
+    L.x0 = L.align === "left" ? L.x : L.align === "right" ? L.x - wd : L.x - wd/2;
+    L.x1 = L.x0 + wd;
+    let guard = 0;
+    while (placed.some(q => Math.abs(q.y - L.y) < 14 && L.x0 < q.x1 + 8 && q.x0 < L.x1 + 8) && guard++ < 10) L.y += 15;
+    placed.push(L);
+    g.textAlign = L.align;
+    g.lineWidth = 3.5; g.strokeStyle = "rgba(6,18,25,.9)"; g.strokeText(L.text, L.x, L.y);
+    g.fillStyle = "#EAF4F3"; g.fillText(L.text, L.x, L.y);
+  });
+
+  // --- рыбак ---
+  if (cy < h + 30){
+    g.beginPath(); g.moveTo(cx, cy-9); g.lineTo(cx-7, cy+5); g.lineTo(cx+7, cy+5); g.closePath();
+    g.fillStyle = "#F0B429"; g.fill();
+    g.fillStyle = "#8FB0B6"; g.textAlign = "center"; g.font = mono;
+    g.fillText("ВЫ", cx, cy + 19);
+  }
+  g.fillStyle = "#8FB0B6"; g.font = mono; g.textAlign = "right";
+  if (mean != null) g.fillText("центр " + Math.round(mean) + "°", w - 8, h - 8);
+  if (topZoom > 1.02){ g.textAlign = "left"; g.fillText("×" + fmt(topZoom,1), 8, h - 8); }
+
+  const usedB = BOTTOM.filter(b => flat.some(q => q.bottom === b.k));
+  $("#tlegend").innerHTML =
+    `<span style="display:flex;align-items:center;gap:7px">Счёт ${fmt(minY)}
+      <i style="width:66px;height:9px;border-radius:5px;display:inline-block;background:linear-gradient(90deg,${rampCSS(0)},${rampCSS(.35)},${rampCSS(.65)},${rampCSS(1)})"></i> ${fmt(maxY)}</span>` +
+    `<span>Изолинии через <b>${fmt(step)}</b></span>` +
+    `<span>Дальность в ${unit}</span>` +
+    (usedB.length ? `<span style="flex-basis:100%;display:flex;gap:12px;flex-wrap:wrap;padding-top:2px">` +
+      usedB.map(b=>`<span style="display:flex;align-items:center;gap:6px"><i class="sw" style="background:${b.c}"></i>${b.n}</span>`).join("") + `</span>` : "");
+}
+
+/* ============================================================
+   ЛУЧ: СОЗДАНИЕ И КОМПАС
+   ============================================================ */
+let compassStop = null;
+function readCompass(cb){
+  if (compassStop) compassStop();
+  const attach = () => {
+    let got = false, timer = null;
+    const h = e => {
+      let deg = null;
+      if (typeof e.webkitCompassHeading === "number") deg = e.webkitCompassHeading;
+      else if (typeof e.alpha === "number") deg = (360 - e.alpha) % 360;
+      if (deg == null || isNaN(deg)) return;
+      got = true; cb(Math.round(deg));
+    };
+    window.addEventListener("deviceorientationabsolute", h, true);
+    window.addEventListener("deviceorientation", h, true);
+    compassStop = () => {
+      window.removeEventListener("deviceorientationabsolute", h, true);
+      window.removeEventListener("deviceorientation", h, true);
+      clearTimeout(timer);
+      compassStop = null;
+    };
+    toast("Наведите телефон вдоль удилища");
+    timer = setTimeout(() => { if (compassStop) compassStop(); if (!got) toast("Компас недоступен — впишите вручную"); }, 8000);
+  };
+  try {
+    if (typeof DeviceOrientationEvent !== "undefined" && typeof DeviceOrientationEvent.requestPermission === "function"){
+      DeviceOrientationEvent.requestPermission().then(r => r === "granted" ? attach() : toast("Компас не разрешён"));
+      return;
+    }
+  } catch(e){}
+  attach();
+}
+function lineSheet(p, line){
+  const m = $("#modal");
+  m.innerHTML = `<div class="sheet">
+    <div class="grab"></div>
+    <h2>${line ? "Изменить луч" : "Новый луч"}</h2>
+    <label class="f"><span>Название</span><input type="text" id="lName" value="${line?esc(line.name):""}" placeholder="На сухое дерево"></label>
+    <label class="f"><span>Азимут, градусов</span>
+      <div style="display:flex;gap:8px">
+        <input type="number" inputmode="numeric" min="0" max="359" id="lAz" value="${line&&line.az!=null?line.az:""}" placeholder="0–359">
+        <button class="btn sm ghost" id="lComp" style="flex:0 0 auto;height:48px">Компас</button>
+      </div></label>
+    <div class="tiny muted" style="margin:-4px 0 12px">Встаньте лицом по направлению заброса, держите телефон ровно и нажмите «Компас» — цифра будет обновляться живьём.</div>
+    <label class="f"><span>Дальность заброса, оборотов</span><input type="number" inputmode="decimal" step="1" id="lCast" value="${line&&line.cast?line.cast:""}" placeholder="80"></label>
+    <div class="row" style="margin-top:6px">
+      <button class="btn ghost" id="lCancel">Отмена</button>
+      <button class="btn primary" id="lOk">${line ? "Сохранить" : "Создать луч"}</button>
+    </div>
+  </div>`;
+  m.classList.add("on");
+  m.onclick = e => { if (e.target === m) closeModal(); };
+  $("#lCancel").onclick = closeModal;
+  $("#lComp").onclick = () => readCompass(deg => { $("#lAz").value = deg; });
+  $("#lOk").onclick = () => {
+    const name = $("#lName").value.trim();
+    if (!name) return toast("Введите название луча");
+    const azRaw = $("#lAz").value;
+    const az = azRaw === "" ? null : ((Math.round(num(azRaw)) % 360) + 360) % 360;
+    const cast = num($("#lCast").value) || null;
+    if (line){ line.name = name; line.az = az; line.cast = cast; toast("Луч сохранён"); }
+    else {
+      p.lines = p.lines || [];
+      p.lines.push({ id: uid(), name, az, cast, measures: [] });
+      toast("Луч создан");
+    }
+    save(); closeModal(); render();
+  };
+  setTimeout(() => $("#lName").focus(), 60);
+}
+
+/* ============================================================
+   ЭКРАН: КАЛЬКУЛЯТОР КАТУШКИ
+   ============================================================ */
+function viewReel(){
+  const r = DB.reel;
+  const opts = Object.keys(SPOOLS).map(k => `<option value="${k}" ${r.size===k?"selected":""}>${k}</option>`).join("");
+  return `
+  <div class="eyebrow">Шпуля</div>
+  <div class="card">
+    <label class="f"><span>Размер (как на катушке)</span>
+      <select id="rSize">${opts}<option value="custom" ${r.size==="custom"?"selected":""}>свой размер</option></select></label>
+    <div class="row">
+      <label class="f"><span>Диаметр сердечника, мм</span><input type="number" inputmode="decimal" step="0.5" id="rCore" value="${r.core}"></label>
+      <label class="f"><span>Ширина шпули, мм</span><input type="number" inputmode="decimal" step="0.5" id="rWidth" value="${r.width}"></label>
+    </div>
+    <label class="f"><span>Передаточное число (5.2:1)</span><input type="number" inputmode="decimal" step="0.1" id="rRatio" value="${r.ratio}"></label>
+    <div class="tiny muted">Размеры подставлены усреднённые. Замерьте свою шпулю линейкой, а передаточное число возьмите с корпуса катушки — расчёт станет точным.</div>
+  </div>
+
+  <div class="eyebrow">Леска или шнур</div>
+  <div class="card">
+    <div class="row">
+      <label class="f"><span>Диаметр, мм</span><input type="number" inputmode="decimal" step="0.01" id="rLineD" value="${r.lineD}"></label>
+      <label class="f"><span>Намотано, м</span><input type="number" inputmode="decimal" step="5" id="rLineL" value="${r.lineL}"></label>
+    </div>
+  </div>
+
+  <div class="eyebrow">Результат</div>
+  <div class="readout" id="rOut"></div>
+
+  <div class="eyebrow">Перевод</div>
+  <div class="card">
+    <div class="row" style="align-items:flex-end">
+      <label class="f" style="margin:0"><span>Метры</span><input type="number" inputmode="decimal" step="1" id="cM" placeholder="0"></label>
+      <div style="flex:0 0 30px;text-align:center;color:var(--mist);padding-bottom:14px;font-size:18px">⇄</div>
+      <label class="f" style="margin:0"><span>Обороты</span><input type="number" inputmode="decimal" step="1" id="cT" placeholder="0"></label>
+    </div>
+    <div class="tiny muted" style="margin-top:10px">Считается для подмотки с полной шпули: первые обороты «съедают» больше лески, чем последние.</div>
+  </div>
+
+  <div class="eyebrow">Пресеты</div>
+  <div class="card">
+    <div class="chips" id="presetList" style="margin-bottom:${DB.presets.length?"12px":"0"}"></div>
+    <div class="row" style="margin-top:2px">
+      <input type="text" id="pName" placeholder="Например: Феникс 4000 + 0.25">
+      <button class="btn primary" id="pSave" style="flex:0 0 auto">Сохранить</button>
+    </div>
+  </div>`;
+}
+function readReel(){
+  return {
+    size: $("#rSize").value, core: num($("#rCore").value), width: num($("#rWidth").value),
+    ratio: num($("#rRatio").value), lineD: num($("#rLineD").value), lineL: num($("#rLineL").value)
+  };
+}
+function afterReel(){
+  const recalc = (detachPreset = false) => {
+    if (detachPreset) DB.activePreset = null;
+    DB.reel = readReel(); save();
+    if (detachPreset) paint();
+    const s = DB.reel, out = $("#rOut");
+    if (!spoolOK(s) || s.lineL <= 0){ out.innerHTML = `<div class="span2"><div class="k">Нет данных</div><div class="v">— · —</div></div>`; return; }
+    const H = handleTurns(s);
+    const first = turnsToMeters(1, s);                 // метры за первый оборот ручки (шпуля полная)
+    const last  = s.lineL - turnsToMeters(H-1, s);     // метры за последний оборот (шпуля почти пустая)
+    const layers = Math.ceil(turnsForLength(s.lineL, s) / perLayer(s));
+    out.innerHTML =
+      `<div class="span2"><div class="k">Оборотов ручки на ${fmt(s.lineL)} м</div><div class="v big">${fmt(H,0)}</div></div>
+       <div><div class="k">За оборот, полная</div><div class="v">${fmt(first,2)} м</div></div>
+       <div><div class="k">За оборот, пустая</div><div class="v">${fmt(last,2)} м</div></div>
+       <div><div class="k">Слоёв намотки</div><div class="v">${layers}</div></div>
+       <div><div class="k">Витков в слое</div><div class="v">${perLayer(s)}</div></div>`;
+  };
+  $("#rSize").onchange = e => {
+    const v = e.target.value;
+    if (SPOOLS[v]){ $("#rCore").value = SPOOLS[v][0]; $("#rWidth").value = SPOOLS[v][1]; }
+    recalc(true);
+  };
+  ["#rCore","#rWidth","#rRatio","#rLineD","#rLineL"].forEach(id => $(id).oninput = () => recalc(true));
+
+  const cM = $("#cM"), cT = $("#cT");
+  cM.oninput = () => { const s = readReel(); cT.value = cM.value === "" ? "" : inputFmt(metersToTurns(num(cM.value), s), 1); };
+  cT.oninput = () => { const s = readReel(); cM.value = cT.value === "" ? "" : inputFmt(turnsToMeters(num(cT.value), s), 1); };
+
+  const paint = () => {
+    $("#presetList").innerHTML = DB.presets.map(p =>
+      `<span class="chip ${DB.activePreset===p.id?"on":""}"><button data-load="${p.id}" style="color:inherit">${esc(p.name)}</button><button class="x" data-pdel="${p.id}" aria-label="Удалить">×</button></span>`
+    ).join("");
+    document.querySelectorAll("[data-load]").forEach(b => b.onclick = () => {
+      const p = DB.presets.find(x => x.id === b.dataset.load); if (!p) return;
+      DB.reel = { ...p.data }; DB.activePreset = p.id; save(); render(); toast("Пресет «" + p.name + "» загружен");
+    });
+    document.querySelectorAll("[data-pdel]").forEach(b => b.onclick = () => {
+      DB.presets = DB.presets.filter(x => x.id !== b.dataset.pdel);
+      if (DB.activePreset === b.dataset.pdel) DB.activePreset = null;
+      save(); paint();
+    });
+  };
+  $("#pSave").onclick = () => {
+    const name = $("#pName").value.trim();
+    if (!name) return toast("Введите название пресета");
+    const p = { id: uid(), name, data: readReel() };
+    DB.presets.push(p); DB.activePreset = p.id; DB.reel = p.data;
+    $("#pName").value = ""; save(); paint(); toast("Пресет сохранён");
+  };
+  recalc(); paint();
+}
+
+/* ============================================================
+   МОДАЛКА: МЕСТО
+   ============================================================ */
+let photoBuf = null;
+function placeSheet(place){
+  photoBuf = place ? (place.photo || null) : null;
+  const m = $("#modal");
+  m.innerHTML = `<div class="sheet">
+    <div class="grab"></div>
+    <h2>${place ? "Изменить место" : "Новое место"}</h2>
+    <label class="f"><span>Название</span><input type="text" id="fName" value="${place?esc(place.name):""}" placeholder="Старая коряга"></label>
+    <label class="f"><span>Координаты</span>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="fCoords" value="${place?esc(place.coords||""):""}" placeholder="49.8420, 24.0315">
+        <button class="btn sm ghost" id="gps" style="flex:0 0 auto;height:48px">GPS</button>
+      </div></label>
+    <label class="f"><span>Фото</span></label>
+    <img class="photo-prev" id="prev" src="${photoBuf||""}" style="${photoBuf?"":"display:none"}" alt="">
+    <div class="row" style="margin-bottom:10px">
+      <button class="btn sm ghost" id="pick">${photoBuf?"Заменить фото":"Добавить фото"}</button>
+      <button class="btn sm ghost danger" id="rmPhoto" style="${photoBuf?"":"display:none"}">Убрать фото</button>
+    </div>
+    <input type="file" id="fPhoto" accept="image/*">
+    <label class="f"><span>Комментарий</span><textarea id="fComment" placeholder="Подход с воды, ветер в спину, ракушка на 25 оборотах…">${place?esc(place.comment||""):""}</textarea></label>
+    <div class="row" style="margin-top:6px">
+      <button class="btn ghost" id="cancel">Отмена</button>
+      <button class="btn primary" id="ok">${place ? "Сохранить" : "Создать место"}</button>
+    </div>
+  </div>`;
+  m.classList.add("on");
+  m.onclick = e => { if (e.target === m) closeModal(); };
+  $("#cancel").onclick = closeModal;
+  $("#pick").onclick = () => $("#fPhoto").click();
+  $("#rmPhoto").onclick = () => { photoBuf = null; $("#prev").style.display = "none"; $("#rmPhoto").style.display = "none"; $("#pick").textContent = "Добавить фото"; };
+  $("#fPhoto").onchange = e => {
+    const f = e.target.files[0]; if (!f) return;
+    shrink(f, d => { photoBuf = d; const pv = $("#prev"); pv.src = d; pv.style.display = "block"; $("#rmPhoto").style.display = ""; $("#pick").textContent = "Заменить фото"; });
+  };
+  $("#gps").onclick = () => {
+    if (!navigator.geolocation) return toast("Телефон не отдаёт координаты");
+    toast("Ищу спутники…");
+    navigator.geolocation.getCurrentPosition(
+      pos => { $("#fCoords").value = pos.coords.latitude.toFixed(5) + ", " + pos.coords.longitude.toFixed(5); toast("Координаты записаны"); },
+      () => toast("Не удалось получить координаты"),
+      { enableHighAccuracy:true, timeout:12000 }
+    );
+  };
+  $("#ok").onclick = () => {
+    const name = $("#fName").value.trim();
+    if (!name) return toast("Введите название места");
+    const data = { name, coords: $("#fCoords").value.trim(), comment: $("#fComment").value.trim(), photo: photoBuf };
+    if (place){ Object.assign(place, data); toast("Место сохранено"); }
+    else { DB.places.unshift({ id: uid(), ...data, lines: [], created: Date.now() }); toast("Место создано"); }
+    save(); closeModal(); render();
+  };
+  setTimeout(() => $("#fName").focus(), 60);
+}
+function closeModal(){
+  if (compassStop) compassStop();
+  $("#modal").classList.remove("on");
+  $("#modal").innerHTML = "";
+}
+
+function shrink(file, cb){
+  const img = new Image(), fr = new FileReader();
+  fr.onload = () => { img.onload = () => {
+    const max = 1000, k = Math.min(1, max / Math.max(img.width, img.height));
+    const c = document.createElement("canvas");
+    c.width = Math.round(img.width*k); c.height = Math.round(img.height*k);
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    cb(c.toDataURL("image/jpeg", 0.72));
+  }; img.src = fr.result; };
+  fr.readAsDataURL(file);
+}
+
+/* ============================================================
+   МЕНЮ, ЭКСПОРТ, СТАРТ
+   ============================================================ */
+function openDrawer(){ $("#drawer").classList.add("on"); $("#scrim").classList.add("on"); }
+function closeDrawer(){ $("#drawer").classList.remove("on"); $("#scrim").classList.remove("on"); }
+
+$("#leftBtn").onclick = () => { route.view === "places" ? openDrawer() : back(); };
+$("#addBtn").onclick = () => {
+  if (route.view === "places") placeSheet(null);
+  else if (route.view === "place"){ const p = findPlace(route.id); if (p) lineSheet(p, null); }
+  else if (route.view === "line"){ const q = $("#qCount"); if (q){ q.focus(); q.scrollIntoView({block:"center"}); } }
+};
+$("#scrim").onclick = closeDrawer;
+document.querySelectorAll("[data-nav]").forEach(b => b.onclick = () => go(b.dataset.nav));
+$("#demoBtn").onclick = () => {
+  const has = DB.places.some(p => p.demo);
+  if (!has) return toast("Демо-мест нет");
+  if (!confirm("Удалить оба демо-места? Ваши места останутся.")) return;
+  DB.places = DB.places.filter(p => !p.demo);
+  DB.presets = DB.presets.filter(p => p.id !== "demo-preset");
+  if (DB.activePreset === "demo-preset") DB.activePreset = null;
+  save(); go("places"); toast("Демо-места удалены");
+};
+$("#exportBtn").onclick = () => {
+  const blob = new Blob([JSON.stringify(DB)], { type:"application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "рыбалка-" + new Date().toISOString().slice(0,10) + ".json";
+  a.click(); URL.revokeObjectURL(a.href); closeDrawer(); toast("Копия сохранена в файл");
+};
+function validImport(d){
+  const finite = v => Number.isFinite(Number(v));
+  const reel = s => s && typeof s === "object" &&
+    ["core","width","lineD","lineL"].every(k => finite(s[k])) &&
+    (s.ratio == null || finite(s.ratio));
+  const measure = m => m && typeof m === "object" && typeof m.id === "string" &&
+    finite(m.turns) && finite(m.count);
+  const line = l => l && typeof l === "object" && typeof l.id === "string" &&
+    typeof l.name === "string" && Array.isArray(l.measures) && l.measures.every(measure);
+  const place = p => p && typeof p === "object" && typeof p.id === "string" &&
+    typeof p.name === "string" && (Array.isArray(p.lines) ? p.lines.every(line) :
+      Array.isArray(p.measures) && p.measures.every(measure));
+  const preset = p => p && typeof p === "object" && typeof p.id === "string" &&
+    typeof p.name === "string" && reel(p.data);
+  return d && typeof d === "object" && Array.isArray(d.places) && d.places.every(place) &&
+    (!("reel" in d) || reel(d.reel)) &&
+    (!("presets" in d) || Array.isArray(d.presets) && d.presets.every(preset));
+}
+
+$("#importBtn").onclick = () => $("#importFile").click();
+$("#importFile").onchange = e => {
+  const f = e.target.files[0]; if (!f) return;
+  const fr = new FileReader();
+  fr.onload = () => {
+    try {
+      const d = JSON.parse(fr.result);
+      if (!validImport(d)) throw 0;
+      DB = Object.assign(DB, d); normalizeDB(); save(); go("places"); toast("Данные загружены");
+    } catch(err){ toast("Файл не подходит"); }
+  };
+  fr.readAsText(f); e.target.value = "";
+};
+window.addEventListener("keydown", e => { if (e.key === "Escape"){ closeModal(); closeDrawer(); } });
+
+load().then(render);
+</script>
+</body>
+</html>
