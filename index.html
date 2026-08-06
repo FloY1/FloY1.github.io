@@ -7,7 +7,9 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>Эхолот — карта дна и места</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<title>Эхолот - карта дна и места</title>
 <style>
 :root{
   --abyss:#07171E;
@@ -163,6 +165,14 @@ input[type=file]{display:none}
 .chartwrap{border:1px solid var(--ridge);border-radius:14px;overflow:hidden;background:#061219}
 #chart{display:block;width:100%;height:340px}
 #topmap{display:block;width:100%;height:380px;touch-action:none}
+#watermap{width:100%;height:min(68vh,620px);min-height:430px;background:#061219}
+.map-status{padding:10px 12px;border:1px solid var(--ridge);border-radius:12px;background:var(--deep);color:var(--mist);font-size:12.5px;margin-top:10px}
+.waterbody-kind{display:inline-flex;align-items:center;height:25px;padding:0 9px;border-radius:13px;border:1px solid var(--ridge);color:var(--shallow);font-family:var(--font-num);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.leaflet-container{font-family:var(--font-ui);background:#061219}
+.leaflet-control-attribution{background:rgba(7,23,30,.82)!important;color:var(--mist)!important}
+.leaflet-control-attribution a{color:var(--shallow)!important}
+.leaflet-bar a{background:var(--deep)!important;color:var(--foam)!important;border-color:var(--ridge)!important}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{background:var(--deep);color:var(--foam)}
 .zoombar{position:absolute;top:54px;right:8px;z-index:2;display:flex;flex-direction:column;gap:6px}
 .zoombar button{width:38px;height:38px;border-radius:10px;background:rgba(7,23,30,.72);
   border:1px solid var(--ridge);color:var(--foam);font-size:17px;line-height:1}
@@ -250,7 +260,7 @@ input[type=file]{display:none}
   <button class="bar-btn" id="leftBtn" aria-label="Меню">
     <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
   </button>
-  <div class="bar-title" id="barTitle">Мои места</div>
+  <div class="bar-title" id="barTitle">Мои водоёмы</div>
   <button class="bar-btn" id="addBtn" aria-label="Добавить">
     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
   </button>
@@ -261,7 +271,7 @@ input[type=file]{display:none}
 <div id="scrim"></div>
 <aside id="drawer">
   <div class="brand">Эхолот</div>
-  <button class="mitem" data-nav="places"><svg viewBox="0 0 24 24"><path d="M12 21s7-5.6 7-11a7 7 0 1 0-14 0c0 5.4 7 11 7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>Мои места</button>
+  <button class="mitem" data-nav="waterbodies"><svg viewBox="0 0 24 24"><path d="M4 8c3-2 5-2 8 0s5 2 8 0M4 13c3-2 5-2 8 0s5 2 8 0M4 18c3-2 5-2 8 0s5 2 8 0"/></svg>Мои водоёмы</button>
   <button class="mitem" data-nav="reel"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.6"/><path d="M12 4v3M12 17v3M4 12h3M17 12h3"/></svg>Калькулятор катушки</button>
   <button class="mitem" id="demoBtn"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg>Убрать демо-места</button>
   <button class="mitem" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg>Сохранить копию</button>
@@ -272,11 +282,13 @@ input[type=file]{display:none}
 
 <div id="modal"></div>
 <div id="toast"></div>
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="app-core.js"></script>
 
 <script>
 "use strict";
 /* ============================================================
-   ХРАНИЛИЩЕ  (localStorage; запасной вариант — window.storage)
+   ХРАНИЛИЩЕ (localStorage; запасной вариант - window.storage)
    ============================================================ */
 const KEY = "fishmap.db.v1";
 const LS = (() => { try { localStorage.setItem("__t","1"); localStorage.removeItem("__t"); return localStorage; } catch(e){ return null; } })();
@@ -287,32 +299,46 @@ async function rawGet(){
   return null;
 }
 async function rawSet(v){
-  if (LS) { try { LS.setItem(KEY, v); return true; } catch(e){ toast("Память телефона переполнена — удалите старые фото"); return false; } }
+  if (LS) { try { LS.setItem(KEY, v); return true; } catch(e){ toast("Память телефона переполнена - удалите старые фото"); return false; } }
   if (window.storage) { try { await window.storage.set(KEY, v); return true; } catch(e){ return false; } }
   return false;
 }
 
-let DB = { places: [], reel: null, presets: [], activePreset: null, chartMeters: false };
+let DB = { waterbodies:[], reel:null, presets:[], activePreset:null, chartMeters:false };
+let LAKE_CATALOG = [];
+const LAKE_MANIFESTS = new Map();
 let saveTimer = null;
 function save(){ clearTimeout(saveTimer); saveTimer = setTimeout(()=>rawSet(JSON.stringify(DB)), 120); }
-function normalizeDB(){
-  if (!DB.reel) DB.reel = { size:"3000", core:36, width:15, ratio:5.2, lineD:0.25, lineL:150 };
-  if (!DB.reel.ratio) DB.reel.ratio = 5.2;
-  if (!Array.isArray(DB.places)) DB.places = [];
-  if (!Array.isArray(DB.presets)) DB.presets = [];
-  DB.places.forEach(p => {
-    if (!Array.isArray(p.lines)){
-      p.lines = [{ id: uid(), name: "Луч 1", az: null, cast: p.cast||null, measures: p.measures||[] }];
-      delete p.measures; delete p.cast;
-    }
-  });
+function normalizeDB(){ DB = AppCore.normalizeDatabase(DB, uid); }
+async function loadLakeCatalog(){
+  try {
+    const response = await fetch("lakes/index.json");
+    if (!response.ok) throw new Error();
+    const catalog = await response.json();
+    LAKE_CATALOG = Array.isArray(catalog.waterbodies) ? catalog.waterbodies : [];
+  } catch(e){ LAKE_CATALOG = []; }
+}
+async function loadLakeManifest(slug){
+  if (LAKE_MANIFESTS.has(slug)) return LAKE_MANIFESTS.get(slug);
+  const entry = LAKE_CATALOG.find(item => item && item.slug === slug);
+  if (!entry || typeof entry.release !== "string" || !/^[A-Za-z0-9-]+$/.test(entry.release)){
+    throw new Error("Lake release is missing");
+  }
+  const response = await fetch(`lakes/${encodeURIComponent(slug)}/${encodeURIComponent(entry.release)}/lake.json`);
+  if (!response.ok) throw new Error(`Lake manifest HTTP ${response.status}`);
+  const manifest = await response.json();
+  if (!AppCore.validLakeManifest(manifest) || manifest.slug !== slug || manifest.release !== entry.release){
+    throw new Error("Invalid lake manifest");
+  }
+  LAKE_MANIFESTS.set(slug, manifest);
+  return manifest;
 }
 async function load(){
   const raw = await rawGet();
-  if (raw) { try { DB = Object.assign(DB, JSON.parse(raw)); } catch(e){} }
+  if (raw) { try { DB = JSON.parse(raw); } catch(e){} }
   normalizeDB();
   if (!raw) seedDemo();
-  else if (DB.demoV !== 4 && DB.places.some(p => p.demo)) seedDemo();
+  else if (DB.demoV !== 5 && allPlaces().some(place => place.demo)) seedDemo();
 }
 
 /* ---- Демо-места (создаются только при первом открытии) ---- */
@@ -339,48 +365,42 @@ function demoPhoto(top, bottom, sun){
   return c.toDataURL("image/jpeg", 0.7);
 }
 function seedDemo(){
-  const mk = arr => arr.map(a => ({ id: uid(), turns: a[0], count: a[1], bottom: a[2]||null, mark: a[3]||null, note: a[4]||"", clip: !!a[5] }));
-  const line = (name, az, cast, arr) => ({ id: uid(), name, az, cast, measures: mk(arr) });
-  const demo = [
-    { id: uid(), demo: true, name: "Затока за вербою", coords: "49.84210, 24.03150",
-      comment: "Заход с левого берега, ветер в спину. Первая бровка на 25 оборотах, дальше стол и яма под тем берегом.",
-      photo: demoPhoto("#123a4d", "#2a6478", "#f0b429"),
-      created: Date.now(),
-      lines: [
-        line("На вербу", 318, 80, [
-          [80,17,"clay"],[70,21,"il","snag","коряга, рвал поводок"],[60,24,"il"],[55,25,"shell"],
-          [50,26,"shell","spot","клипсуюсь сюда",true],[45,22,"shell"],[40,18,"sand","feed","бью кормушкой"],
-          [35,19,"sand"],[30,18,"clay"],[25,14,"clay",null,"свал начался",true],[20,9,"il"],[15,8,"il"],[10,5,"weed"],[5,3,"weed"]
-        ]),
-        line("Прямо на буй", 345, 70, [
-          [70,23,"il"],[62,25,"il","spot","держу тут ночью",true],[54,24,"shell"],[46,20,"shell"],
-          [38,16,"sand"],[30,13,"clay"],[22,11,"clay"],[14,7,"weed"],[6,4,"weed"]
-        ]),
-        line("Вдоль камыша", 22, 60, [
-          [60,12,"weed"],[52,13,"il"],[44,15,"il"],[36,16,"il","q","мягко, проверить"],
-          [28,14,"clay"],[20,10,"stone"],[12,7,"stone","snag"],[6,4,"weed"]
-        ])
-      ] },
-    { id: uid(), demo: true, name: "Коса на Днестре", coords: "48.51940, 26.62580",
-      comment: "Ракушка с 40 оборотов, поводки рвёт. Кормить точно, течение сносит вправо.",
-      photo: demoPhoto("#3d2b1f", "#6b5233", "#ffd27a"),
-      created: Date.now() - 864e5,
-      lines: [
-        line("На косу", 205, 80, [
-          [80,19,"sand"],[72,26,"clay","q","проверить в след. раз"],[64,30,"il"],
-          [56,31,"il","spot","самая яма",true],[48,28,"shell"],[40,20,"shell","feed"],
-          [32,11,"stone",null,"стучит"],[24,7,"stone"],[16,7,"sand"],[8,6,"sand"]
-        ]),
-        line("Против течения", 240, 75, [
-          [75,22,"stone"],[65,24,"stone"],[55,27,"shell"],[45,29,"shell","spot",null,true],
-          [35,24,"il"],[25,15,"clay"],[15,9,"sand"],[7,6,"sand"]
-        ])
-      ] }
-  ];
-  DB.places = demo.concat(DB.places.filter(p => !p.demo));
-  DB.demoV = 4;
-  if (!DB.presets.some(p => p.id === "demo-preset"))
-    DB.presets.push({ id: "demo-preset", name: "Демо: 3000 + 0.25", data: { ...DB.reel } });
+  const mk = arr => arr.map(a => ({ id:uid(), turns:a[0], count:a[1], bottom:a[2]||null, mark:a[3]||null, note:a[4]||"", clip:!!a[5] }));
+  const line = (name, az, cast, arr) => ({ id:uid(), name, az, cast, measures:mk(arr) });
+  const lakePlace = { id:uid(), demo:true, name:"Затока за вербою", coords:"49.84210, 24.03150",
+    comment:"Заход с левого берега, ветер в спину. Первая бровка на 25 оборотах, дальше стол и яма под тем берегом.",
+    photo:demoPhoto("#123a4d", "#2a6478", "#f0b429"), created:Date.now(),
+    lines:[
+      line("На вербу", 318, 80, [
+        [80,17,"clay"],[70,21,"il","snag","коряга, рвал поводок"],[60,24,"il"],[55,25,"shell"],
+        [50,26,"shell","spot","клипсуюсь сюда",true],[45,22,"shell"],[40,18,"sand","feed","бью кормушкой"],
+        [35,19,"sand"],[30,18,"clay"],[25,14,"clay",null,"свал начался",true],[20,9,"il"],[15,8,"il"],[10,5,"weed"],[5,3,"weed"]
+      ]),
+      line("Прямо на буй", 345, 70, [
+        [70,23,"il"],[62,25,"il","spot","держу тут ночью",true],[54,24,"shell"],[46,20,"shell"],
+        [38,16,"sand"],[30,13,"clay"],[22,11,"clay"],[14,7,"weed"],[6,4,"weed"]
+      ]),
+      line("Вдоль камыша", 22, 60, [
+        [60,12,"weed"],[52,13,"il"],[44,15,"il"],[36,16,"il","q","мягко, проверить"],
+        [28,14,"clay"],[20,10,"stone"],[12,7,"stone","snag"],[6,4,"weed"]
+      ])
+    ] };
+  const riverPlace = { id:uid(), demo:true, name:"Коса на Днестре", coords:"48.51940, 26.62580",
+    comment:"Ракушка с 40 оборотов, поводки рвёт. Кормить точно, течение сносит вправо.",
+    photo:demoPhoto("#3d2b1f", "#6b5233", "#ffd27a"), created:Date.now()-864e5,
+    lines:[
+      line("На косу", 205, 80, [[80,19,"sand"],[72,26,"clay","q","проверить в след. раз"],[64,30,"il"],[56,31,"il","spot","самая яма",true],[48,28,"shell"],[40,20,"shell","feed"],[32,11,"stone",null,"стучит"],[24,7,"stone"],[16,7,"sand"],[8,6,"sand"]]),
+      line("Против течения", 240, 75, [[75,22,"stone"],[65,24,"stone"],[55,27,"shell"],[45,29,"shell","spot",null,true],[35,24,"il"],[25,15,"clay"],[15,9,"sand"],[7,6,"sand"]])
+    ] };
+  DB.waterbodies.forEach(waterbody => { waterbody.places = (waterbody.places||[]).filter(place => !place.demo); });
+  DB.waterbodies = DB.waterbodies.filter(waterbody => !waterbody.demo && !(waterbody.id === "unassigned" && !waterbody.places.length));
+  DB.waterbodies.unshift(
+    { id:"demo-waterbody-lake", demo:true, name:"Демо-озеро", type:"lake", packageSlug:"demo-lake", places:[lakePlace] },
+    { id:"demo-waterbody-river", demo:true, name:"Днестр", type:"river", packageSlug:null, places:[riverPlace] }
+  );
+  DB.demoV = 5;
+  if (!DB.presets.some(preset => preset.id === "demo-preset"))
+    DB.presets.push({ id:"demo-preset", name:"Демо: 3000 + 0.25", data:{ ...DB.reel } });
   save();
 }
 
@@ -399,7 +419,11 @@ function toast(msg){
   const t = $("#toast"); t.textContent = msg; t.classList.add("on");
   clearTimeout(toastTimer); toastTimer = setTimeout(()=>t.classList.remove("on"), 2200);
 }
-function findPlace(id){ return DB.places.find(p => p.id === id); }
+const allPlaces = () => DB.waterbodies.flatMap(waterbody => waterbody.places || []);
+function findWaterbody(id){ return DB.waterbodies.find(waterbody => waterbody.id === id); }
+function findPlace(id){ return allPlaces().find(place => place.id === id); }
+function waterbodyForPlace(id){ return DB.waterbodies.find(waterbody => (waterbody.places||[]).some(place => place.id === id)); }
+function waterbodyTypeName(type){ return ({ lake:"Озеро", reservoir:"Водохранилище", river:"Река", unassigned:"Без типа" })[type] || "Водоём"; }
 
 /* ---- Дно и метки ---- */
 const BOTTOM = [
@@ -475,9 +499,21 @@ function activeSpool(){
 /* ============================================================
    НАВИГАЦИЯ
    ============================================================ */
-let route = { view:"places", id:null, lid:null };
+let route = { view:"waterbodies", id:null, lid:null, wid:null };
 let viewCleanup = null;
-function go(view, id, lid){ route = { view, id: id||null, lid: lid||null }; render(); window.scrollTo(0,0); closeDrawer(); }
+function go(view, id, lid, wid){
+  let placeId = id || null;
+  let waterbodyId = wid || null;
+  if (view === "waterbody" || view === "watermap"){
+    waterbodyId = id || null;
+    placeId = null;
+  } else if (placeId && !waterbodyId){
+    const parent = waterbodyForPlace(placeId);
+    waterbodyId = parent ? parent.id : null;
+  }
+  route = { view, id:placeId, lid:lid||null, wid:waterbodyId };
+  render(); window.scrollTo(0,0); closeDrawer();
+}
 function findLine(p, lid){ return (p.lines||[]).find(l => l.id === lid); }
 
 const ICON_MENU = '<path d="M3 6h18M3 12h18M3 18h18"/>';
@@ -486,59 +522,107 @@ const ICON_BACK = '<path d="M15 5l-7 7 7 7"/>';
 function render(){
   if (viewCleanup){ viewCleanup(); viewCleanup = null; }
   const v = $("#view"), left = $("#leftBtn"), add = $("#addBtn");
-  const root = route.view === "places";
+  const root = route.view === "waterbodies";
   left.querySelector("svg").innerHTML = root ? ICON_MENU : ICON_BACK;
   left.setAttribute("aria-label", root ? "Меню" : "Назад");
-  add.style.visibility = (route.view === "places" || route.view === "place" || route.view === "line") ? "visible" : "hidden";
+  add.style.visibility = ["waterbodies","waterbody","place","line"].includes(route.view) ? "visible" : "hidden";
 
-  const p = route.id ? findPlace(route.id) : null;
-  if (route.view !== "places" && route.view !== "reel" && !p) return go("places");
+  const waterbody = route.wid ? findWaterbody(route.wid) : null;
+  const place = route.id ? findPlace(route.id) : null;
+  if (["waterbody","watermap"].includes(route.view) && !waterbody) return go("waterbodies");
+  if (!["waterbodies","waterbody","watermap","reel"].includes(route.view) && !place) return waterbody ? go("waterbody", waterbody.id) : go("waterbodies");
 
-  if (route.view === "places"){ $("#barTitle").textContent = "Мои места"; v.innerHTML = viewPlaces(); afterPlaces(); }
-  else if (route.view === "place"){ $("#barTitle").textContent = p.name; v.innerHTML = viewPlace(p); afterPlace(p); }
-  else if (route.view === "line"){ const l = findLine(p, route.lid); if(!l) return go("place", p.id);
-    $("#barTitle").textContent = l.name; v.innerHTML = viewLine(p, l); afterLine(p, l); }
-  else if (route.view === "chart"){ const l = findLine(p, route.lid); if(!l) return go("place", p.id);
-    $("#barTitle").textContent = "Профиль: " + l.name; v.innerHTML = viewChart(p, l); afterChart(p, l); }
-  else if (route.view === "top"){ $("#barTitle").textContent = "Вид сверху"; v.innerHTML = viewTop(p); afterTop(p); }
+  if (route.view === "waterbodies"){ $("#barTitle").textContent = "Мои водоёмы"; v.innerHTML = viewWaterbodies(); afterWaterbodies(); }
+  else if (route.view === "waterbody"){ $("#barTitle").textContent = waterbody.name; v.innerHTML = viewWaterbody(waterbody); afterWaterbody(waterbody); }
+  else if (route.view === "watermap"){ $("#barTitle").textContent = "Карта: " + waterbody.name; v.innerHTML = viewWaterMap(waterbody); afterWaterMap(waterbody); }
+  else if (route.view === "place"){ $("#barTitle").textContent = place.name; v.innerHTML = viewPlace(place); afterPlace(place); }
+  else if (route.view === "line"){ const line = findLine(place, route.lid); if(!line) return go("place", place.id);
+    $("#barTitle").textContent = line.name; v.innerHTML = viewLine(place, line); afterLine(place, line); }
+  else if (route.view === "chart"){ const line = findLine(place, route.lid); if(!line) return go("place", place.id);
+    $("#barTitle").textContent = "Профиль: " + line.name; v.innerHTML = viewChart(place, line); afterChart(place, line); }
+  else if (route.view === "top"){ $("#barTitle").textContent = "Вид сверху"; v.innerHTML = viewTop(place); afterTop(place); }
   else if (route.view === "reel"){ $("#barTitle").textContent = "Калькулятор катушки"; v.innerHTML = viewReel(); afterReel(); }
 }
 function back(){
-  if (route.view === "place") go("places");
+  if (route.view === "waterbody" || route.view === "reel") go("waterbodies");
+  else if (route.view === "watermap") go("waterbody", route.wid);
+  else if (route.view === "place") go("waterbody", route.wid);
   else if (route.view === "line" || route.view === "top") go("place", route.id);
   else if (route.view === "chart") go("line", route.id, route.lid);
-  else go("places");
+  else go("waterbodies");
 }
 
 /* ============================================================
-   ЭКРАН: СПИСОК МЕСТ
+   ЭКРАНЫ: ВОДОЁМЫ И МЕСТА
    ============================================================ */
-function viewPlaces(){
-  if (!DB.places.length) return `
+function viewWaterbodies(){
+  if (!DB.waterbodies.length) return `
     <div class="empty">
-      <div class="big">◎</div>
-      <div style="font-size:17px;color:var(--foam);margin-bottom:6px">Мест пока нет</div>
-      <div class="tiny">Нажмите + вверху справа, чтобы добавить первое место</div>
+      <div class="big">≈</div>
+      <div style="font-size:17px;color:var(--foam);margin-bottom:6px">Водоёмов пока нет</div>
+      <div class="tiny">Нажмите +, чтобы добавить озеро или водохранилище</div>
     </div>`;
-  return `<div class="eyebrow">Мест: ${DB.places.length}</div>` + DB.places.map(p => {
-    const lines = p.lines || [], total = lines.reduce((n,l) => n + (l.measures||[]).length, 0);
-    const best = lines.slice().sort((a,b)=>(b.measures||[]).length-(a.measures||[]).length)[0];
-    const meta = [ lines.length + " луч." , total + " замер.", p.coords ? esc(p.coords) : "" ].filter(Boolean).join(" · ");
-    return `<button class="card place" data-open="${p.id}">
-      ${ p.photo ? `<img class="thumb" src="${p.photo}" alt="">` : `<div class="thumb ph">◎</div>` }
+  return `<div class="eyebrow">Водоёмов: ${DB.waterbodies.length}</div>` + DB.waterbodies.map(waterbody => {
+    const places = waterbody.places || [];
+    const measures = places.reduce((sum, place) => sum + (place.lines||[]).reduce((count,line) => count + (line.measures||[]).length, 0), 0);
+    const meta = [waterbodyTypeName(waterbody.type), places.length + " мест", measures + " замер.", waterbody.packageSlug ? "есть батиметрия" : ""].filter(Boolean).join(" · ");
+    return `<button class="card place" data-waterbody="${esc(waterbody.id)}">
+      <div class="thumb ph">≈</div>
       <div class="place-main">
-        <div class="place-name">${esc(p.name)}</div>
+        <div class="place-name">${esc(waterbody.name)}</div>
         <div class="place-meta">${meta}</div>
-        ${ best && (best.measures||[]).length>1 ? `<canvas class="spark" data-spark="${p.id}|${best.id}"></canvas>` : "" }
       </div>
     </button>`;
   }).join("");
 }
-function afterPlaces(){
-  document.querySelectorAll("[data-open]").forEach(el => el.onclick = () => go("place", el.dataset.open));
-  document.querySelectorAll("[data-spark]").forEach(c => {
-    const [pid, lid] = c.dataset.spark.split("|");
-    drawSpark(c, findLine(findPlace(pid), lid));
+function afterWaterbodies(){
+  document.querySelectorAll("[data-waterbody]").forEach(element => element.onclick = () => go("waterbody", element.dataset.waterbody));
+}
+function viewWaterbody(waterbody){
+  const places = waterbody.places || [];
+  return `
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <h2>${esc(waterbody.name)}</h2>
+      <span class="waterbody-kind">${esc(waterbodyTypeName(waterbody.type))}</span>
+    </div>
+    <div class="tiny muted" style="margin-top:6px">${waterbody.packageSlug ? "Пакет батиметрии: " + esc(waterbody.packageSlug) : "Пакет батиметрии не привязан"}</div>
+    <div class="row" style="margin-top:12px">
+      <button class="btn sm ghost" id="editWaterbody">Изменить</button>
+      <button class="btn sm ghost danger" id="delWaterbody">Удалить</button>
+    </div>
+  </div>
+  <button class="btn primary wide" id="toWaterMap" ${waterbody.packageSlug ? "" : "disabled"} style="${waterbody.packageSlug ? "" : "opacity:.45"}">Карта водоёма</button>
+  ${waterbody.packageSlug ? "" : `<div class="tiny muted" style="text-align:center;margin-top:8px">Для карты выберите готовый пакет водоёма</div>`}
+  <div class="eyebrow">Места: ${places.length}</div>
+  ${places.length ? places.map(place => {
+    const lines = place.lines || [], total = lines.reduce((sum,line) => sum + (line.measures||[]).length, 0);
+    const best = lines.slice().sort((left,right)=>(right.measures||[]).length-(left.measures||[]).length)[0];
+    const meta = [lines.length + " луч.", total + " замер.", place.coords ? esc(place.coords) : ""].filter(Boolean).join(" · ");
+    return `<button class="card place" data-open="${esc(place.id)}">
+      ${place.photo ? `<img class="thumb" src="${esc(place.photo)}" alt="">` : `<div class="thumb ph">◎</div>`}
+      <div class="place-main">
+        <div class="place-name">${esc(place.name)}</div>
+        <div class="place-meta">${meta}</div>
+        ${best && (best.measures||[]).length > 1 ? `<canvas class="spark" data-spark="${esc(place.id)}|${esc(best.id)}"></canvas>` : ""}
+      </div>
+    </button>`;
+  }).join("") : `<div class="empty tiny">Мест пока нет. Нажмите +, чтобы добавить точку ловли.</div>`}
+  <button class="btn ghost wide" id="addPlace" style="margin-top:4px">Добавить место</button>`;
+}
+function afterWaterbody(waterbody){
+  $("#editWaterbody").onclick = () => waterbodySheet(waterbody);
+  $("#delWaterbody").onclick = () => {
+    if (!confirm("Удалить водоём «" + waterbody.name + "» со всеми местами и замерами?")) return;
+    DB.waterbodies = DB.waterbodies.filter(item => item.id !== waterbody.id);
+    save(); toast("Водоём удалён"); go("waterbodies");
+  };
+  $("#addPlace").onclick = () => placeSheet(waterbody, null);
+  $("#toWaterMap").onclick = () => { if (waterbody.packageSlug) go("watermap", waterbody.id); };
+  document.querySelectorAll("[data-open]").forEach(element => element.onclick = () => go("place", element.dataset.open, null, waterbody.id));
+  document.querySelectorAll("[data-spark]").forEach(canvas => {
+    const [placeId, lineId] = canvas.dataset.spark.split("|");
+    drawSpark(canvas, findLine(findPlace(placeId), lineId));
   });
 }
 
@@ -556,7 +640,7 @@ function viewPlace(p){
   return `
   <div class="card">
     <div style="display:flex;gap:12px;align-items:flex-start">
-      ${ p.photo ? `<img class="thumb" src="${p.photo}" alt="" style="width:72px;height:72px;flex:0 0 72px">` : "" }
+      ${ p.photo ? `<img class="thumb" src="${esc(p.photo)}" alt="" style="width:72px;height:72px;flex:0 0 72px">` : "" }
       <div style="flex:1;min-width:0">
         <h2>${esc(p.name)}</h2>
         ${ p.coords ? `<div class="tiny num muted" style="margin-top:4px">${esc(p.coords)}</div>` : "" }
@@ -571,7 +655,7 @@ function viewPlace(p){
 
   <div class="eyebrow">Лучи: ${lines.length}</div>
   ${ lines.length ? lines.map(l => lineCard(l)).join("")
-    : `<div class="empty tiny">Лучей нет. Луч — это одно направление заброса.<br>Нажмите + вверху справа.</div>` }
+    : `<div class="empty tiny">Лучей нет. Луч - это одно направление заброса.<br>Нажмите + вверху справа.</div>` }
 
   <button class="btn ghost wide" id="addLine" style="margin-top:4px">Добавить луч</button>
   <button class="btn primary wide" id="toTop" style="margin-top:10px;${ready?"":"opacity:.45"}" ${ready?"":"disabled"}>Карта: вид сверху</button>
@@ -587,25 +671,27 @@ function compassBadge(az, big){
 function lineCard(l){
   const m = l.measures || [];
   const meta = [ m.length ? m.length + " замер." : "нет замеров", l.cast ? "заброс " + l.cast + " об." : "" ].filter(Boolean).join(" · ");
-  return `<button class="card place" data-line="${l.id}">
+  return `<button class="card place" data-line="${esc(l.id)}">
     ${compassBadge(l.az)}
     <div class="place-main">
       <div class="place-name">${esc(l.name)}</div>
       <div class="place-meta">${meta}</div>
-      ${ m.length>1 ? `<canvas class="spark" data-lspark="${l.id}"></canvas>` : "" }
+      ${ m.length>1 ? `<canvas class="spark" data-lspark="${esc(l.id)}"></canvas>` : "" }
     </div>
   </button>`;
 }
 function afterPlace(p){
-  $("#editPlace").onclick = () => placeSheet(p);
+  const waterbody = waterbodyForPlace(p.id);
+  $("#editPlace").onclick = () => placeSheet(waterbody, p);
   $("#delPlace").onclick = () => {
     if (!confirm("Удалить место «" + p.name + "» со всеми лучами и замерами?")) return;
-    DB.places = DB.places.filter(x => x.id !== p.id); save(); toast("Место удалено"); go("places");
+    if (waterbody) waterbody.places = waterbody.places.filter(item => item.id !== p.id);
+    save(); toast("Место удалено"); go("waterbody", waterbody ? waterbody.id : null);
   };
   $("#addLine").onclick = () => lineSheet(p, null);
   $("#toTop").onclick = () => { if (!$("#toTop").disabled) go("top", p.id); };
-  document.querySelectorAll("[data-line]").forEach(el => el.onclick = () => go("line", p.id, el.dataset.line));
-  document.querySelectorAll("[data-lspark]").forEach(c => drawSpark(c, findLine(p, c.dataset.lspark)));
+  document.querySelectorAll("[data-line]").forEach(element => element.onclick = () => go("line", p.id, element.dataset.line));
+  document.querySelectorAll("[data-lspark]").forEach(canvas => drawSpark(canvas, findLine(p, canvas.dataset.lspark)));
 }
 
 /* ============================================================
@@ -659,7 +745,7 @@ function viewLine(p, l){
 }
 function mrow(x, i, clip){
   const b = BOT(x.bottom), m = MRK(x.mark);
-  return `<div class="mrow" data-m="${x.id}">
+  return `<div class="mrow" data-m="${esc(x.id)}">
     <div class="idx num">${String(i+1).padStart(2,"0")}</div>
     <div class="grow">
       <div class="val" style="color:var(--shallow)">${fmt(x.turns)}<small>ОБ.</small></div>
@@ -669,9 +755,9 @@ function mrow(x, i, clip){
       ${ clip ? `<div class="tiny" style="color:var(--lure)">${clip}-я клипса</div>` : "" }
       ${ x.note ? `<div class="tiny muted">${esc(x.note)}</div>` : "" }
     </div>
-    <button class="icobtn ${x.clip?"on":""}" data-clip="${x.id}" aria-label="Клипса"><svg viewBox="0 0 24 24"><path d="M16 7v9a4 4 0 0 1-8 0V6a2.5 2.5 0 0 1 5 0v9.5a1 1 0 0 1-2 0V8"/></svg></button>
-    <button class="icobtn" data-edit="${x.id}" aria-label="Изменить"><svg viewBox="0 0 24 24"><path d="M4 20h4L20 8l-4-4L4 16v4z"/></svg></button>
-    <button class="icobtn" data-del="${x.id}" aria-label="Удалить"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg></button>
+    <button class="icobtn ${x.clip?"on":""}" data-clip="${esc(x.id)}" aria-label="Клипса"><svg viewBox="0 0 24 24"><path d="M16 7v9a4 4 0 0 1-8 0V6a2.5 2.5 0 0 1 5 0v9.5a1 1 0 0 1-2 0V8"/></svg></button>
+    <button class="icobtn" data-edit="${esc(x.id)}" aria-label="Изменить"><svg viewBox="0 0 24 24"><path d="M4 20h4L20 8l-4-4L4 16v4z"/></svg></button>
+    <button class="icobtn" data-del="${esc(x.id)}" aria-label="Удалить"><svg viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/></svg></button>
   </div>`;
 }
 function afterLine(p, l){
@@ -1244,6 +1330,92 @@ function drawTop(cv, p){
 }
 
 /* ============================================================
+   ГЕОРЕФЕРЕНСНАЯ КАРТА ВОДОЁМА
+   ============================================================ */
+function viewWaterMap(waterbody){
+  return `
+  <div class="chartwrap"><div id="watermap" aria-label="Карта водоёма"></div></div>
+  <div class="map-status" id="mapStatus">Загружаю локальный пакет водоёма...</div>`;
+}
+async function afterWaterMap(waterbody){
+  const status = $("#mapStatus");
+  try {
+    if (!window.L) throw new Error("Leaflet не загружен");
+    const manifest = await loadLakeManifest(waterbody.packageSlug);
+    if (route.view !== "watermap" || route.wid !== waterbody.id || !$("#watermap")) return;
+    const [minLon, minLat, maxLon, maxLat] = manifest.bbox;
+    const bounds = L.latLngBounds([minLat,minLon], [maxLat,maxLon]);
+    const nativeZoom = manifest.maxZoom;
+    const map = L.map("watermap", {
+      minZoom:Math.max(0, nativeZoom - 4),
+      maxZoom:nativeZoom + 3,
+      maxBounds:bounds.pad(0.75),
+      maxBoundsViscosity:0.7
+    });
+    viewCleanup = () => map.remove();
+    L.tileLayer(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/tiles/{z}/{x}/{y}.png`, {
+      minNativeZoom:nativeZoom,
+      maxNativeZoom:nativeZoom,
+      minZoom:Math.max(0, nativeZoom - 4),
+      maxZoom:nativeZoom + 3,
+      tileSize:manifest.tileSize,
+      bounds,
+      noWrap:true,
+      keepBuffer:2,
+      attribution:manifest.attribution || ""
+    }).addTo(map);
+    const boundaryLayer = L.geoJSON({ type:"Feature", properties:{}, geometry:manifest.boundary }, {
+      style:{ color:"#4FD1C5", weight:2, opacity:0.9, fill:false }
+    }).addTo(map);
+    map.fitBounds(boundaryLayer.getBounds(), { padding:[12,12] });
+
+    const spool = activeSpool();
+    const canProject = spoolOK(spool);
+    const projected = [];
+    let missingCoords = 0;
+    let missingAzimuth = 0;
+    (waterbody.places||[]).forEach(place => {
+      const origin = AppCore.parseCoords(place.coords);
+      if (!origin){ missingCoords++; return; }
+      L.circleMarker([origin.lat,origin.lon], {
+        radius:7, color:"#07171E", weight:2, fillColor:"#F0B429", fillOpacity:1
+      }).bindTooltip(`<b>${esc(place.name)}</b><br>место ловли`).addTo(map);
+      if (!canProject) return;
+      missingAzimuth += (place.lines||[]).filter(line => (line.measures||[]).length && line.az == null).length;
+      AppCore.projectSoundings(place, turns => turnsToMeters(turns, spool)).forEach(line => {
+        projected.push({ place, line, points:line.points.slice().sort((left,right) => left.distanceMeters - right.distanceMeters) });
+      });
+    });
+    const counts = projected.flatMap(item => item.points.map(point => point.count));
+    const minCount = counts.length ? Math.min(...counts) : 0;
+    const maxCount = counts.length ? Math.max(...counts) : 1;
+    projected.forEach(item => {
+      const latLngs = [[item.line.origin.lat,item.line.origin.lon], ...item.points.map(point => [point.lat,point.lon])];
+      L.polyline(latLngs, { color:"#EAF4F3", weight:1.5, opacity:0.8, dashArray:"4 5" })
+        .bindTooltip(esc(item.line.name || "Луч"))
+        .addTo(map);
+      item.points.forEach(point => {
+        const color = rampCSS((point.count - minCount) / ((maxCount - minCount) || 1));
+        L.circleMarker([point.lat,point.lon], {
+          radius:6, color:"#07171E", weight:1.5, fillColor:color, fillOpacity:0.96
+        }).bindTooltip(
+          `<b>${esc(item.place.name)}</b><br>${esc(item.line.name || "Луч")}<br>` +
+          `счёт ${fmt(point.count)}, ${fmt(point.distanceMeters)} м`
+        ).addTo(map);
+      });
+    });
+    const notes = [`Показано мест: ${(waterbody.places||[]).length - missingCoords}`, `замеров: ${counts.length}`];
+    if (!canProject) notes.push("катушка не настроена, лучи скрыты");
+    if (missingCoords) notes.push(`без координат: ${missingCoords}`);
+    if (missingAzimuth) notes.push(`лучей без азимута: ${missingAzimuth}`);
+    status.textContent = notes.join(" · ");
+    setTimeout(() => map.invalidateSize(), 0);
+  } catch(error){
+    status.textContent = "Не удалось открыть локальный пакет: " + error.message;
+  }
+}
+
+/* ============================================================
    ЛУЧ: СОЗДАНИЕ И КОМПАС
    ============================================================ */
 let compassStop = null;
@@ -1402,7 +1574,7 @@ function afterReel(){
 
   const paint = () => {
     $("#presetList").innerHTML = DB.presets.map(p =>
-      `<span class="chip ${DB.activePreset===p.id?"on":""}"><button data-load="${p.id}" style="color:inherit">${esc(p.name)}</button><button class="x" data-pdel="${p.id}" aria-label="Удалить">×</button></span>`
+      `<span class="chip ${DB.activePreset===p.id?"on":""}"><button data-load="${esc(p.id)}" style="color:inherit">${esc(p.name)}</button><button class="x" data-pdel="${esc(p.id)}" aria-label="Удалить">×</button></span>`
     ).join("");
     document.querySelectorAll("[data-load]").forEach(b => b.onclick = () => {
       const p = DB.presets.find(x => x.id === b.dataset.load); if (!p) return;
@@ -1425,10 +1597,67 @@ function afterReel(){
 }
 
 /* ============================================================
-   МОДАЛКА: МЕСТО
+   МОДАЛКИ: ВОДОЁМ И МЕСТО
    ============================================================ */
+function waterbodySheet(waterbody){
+  const modal = $("#modal");
+  const typeOptions = [
+    ["lake","Озеро"],
+    ["reservoir","Водохранилище"],
+    ["river","Река"]
+  ];
+  if (waterbody && waterbody.type === "unassigned") typeOptions.push(["unassigned","Без привязки"]);
+  const packageOptions = LAKE_CATALOG.map(item =>
+    `<option value="${esc(item.slug)}" ${waterbody&&waterbody.packageSlug===item.slug?"selected":""}>${esc(item.name)}</option>`
+  ).join("");
+  modal.innerHTML = `<div class="sheet">
+    <div class="grab"></div>
+    <h2>${waterbody ? "Изменить водоём" : "Новый водоём"}</h2>
+    <label class="f"><span>Название</span><input type="text" id="wName" value="${waterbody?esc(waterbody.name):""}" placeholder="Нарочь"></label>
+    <label class="f"><span>Тип</span><select id="wType">${typeOptions.map(([value,label]) =>
+      `<option value="${value}" ${waterbody&&waterbody.type===value?"selected":""}>${label}</option>`).join("")}</select></label>
+    <label class="f"><span>Готовый пакет глубин</span><select id="wPackage">
+      <option value="">Без пакета</option>${packageOptions}
+    </select></label>
+    <div class="tiny muted" style="margin:-4px 0 12px">Пакеты готовятся на этапе разработки и работают полностью офлайн.</div>
+    <div class="row">
+      <button class="btn ghost" id="wCancel">Отмена</button>
+      <button class="btn primary" id="wOk">${waterbody ? "Сохранить" : "Создать водоём"}</button>
+    </div>
+  </div>`;
+  modal.classList.add("on");
+  modal.onclick = event => { if (event.target === modal) closeModal(); };
+  $("#wCancel").onclick = closeModal;
+  const typeSelect = $("#wType");
+  const packageSelect = $("#wPackage");
+  const syncPackage = () => {
+    const packageSupported = typeSelect.value === "lake" || typeSelect.value === "reservoir";
+    packageSelect.disabled = !packageSupported;
+    if (!packageSupported) packageSelect.value = "";
+  };
+  typeSelect.onchange = syncPackage;
+  syncPackage();
+  $("#wOk").onclick = () => {
+    const name = $("#wName").value.trim();
+    if (!name) return toast("Введите название водоёма");
+    const type = typeSelect.value;
+    const data = {
+      name,
+      type,
+      packageSlug:type === "lake" || type === "reservoir" ? packageSelect.value || null : null
+    };
+    let target = waterbody;
+    if (target) Object.assign(target, data);
+    else {
+      target = { id:uid(), ...data, places:[] };
+      DB.waterbodies.unshift(target);
+    }
+    save(); closeModal(); toast("Водоём сохранён"); go("waterbody", target.id);
+  };
+  setTimeout(() => $("#wName").focus(), 60);
+}
 let photoBuf = null;
-function placeSheet(place){
+function placeSheet(waterbody, place){
   photoBuf = place ? (place.photo || null) : null;
   const m = $("#modal");
   m.innerHTML = `<div class="sheet">
@@ -1441,7 +1670,7 @@ function placeSheet(place){
         <button class="btn sm ghost" id="gps" style="flex:0 0 auto;height:48px">GPS</button>
       </div></label>
     <label class="f"><span>Фото</span></label>
-    <img class="photo-prev" id="prev" src="${photoBuf||""}" style="${photoBuf?"":"display:none"}" alt="">
+    <img class="photo-prev" id="prev" src="${esc(photoBuf||"")}" style="${photoBuf?"":"display:none"}" alt="">
     <div class="row" style="margin-bottom:10px">
       <button class="btn sm ghost" id="pick">${photoBuf?"Заменить фото":"Добавить фото"}</button>
       <button class="btn sm ghost danger" id="rmPhoto" style="${photoBuf?"":"display:none"}">Убрать фото</button>
@@ -1474,9 +1703,11 @@ function placeSheet(place){
   $("#ok").onclick = () => {
     const name = $("#fName").value.trim();
     if (!name) return toast("Введите название места");
-    const data = { name, coords: $("#fCoords").value.trim(), comment: $("#fComment").value.trim(), photo: photoBuf };
+    const coords = $("#fCoords").value.trim();
+    if (coords && !AppCore.parseCoords(coords)) return toast("Координаты нужны в формате: 52.1700, 26.2600");
+    const data = { name, coords, comment:$("#fComment").value.trim(), photo:photoBuf };
     if (place){ Object.assign(place, data); toast("Место сохранено"); }
-    else { DB.places.unshift({ id: uid(), ...data, lines: [], created: Date.now() }); toast("Место создано"); }
+    else if (waterbody){ waterbody.places.unshift({ id:uid(), ...data, lines:[], created:Date.now() }); toast("Место создано"); }
     save(); closeModal(); render();
   };
   setTimeout(() => $("#fName").focus(), 60);
@@ -1505,48 +1736,34 @@ function shrink(file, cb){
 function openDrawer(){ $("#drawer").classList.add("on"); $("#scrim").classList.add("on"); }
 function closeDrawer(){ $("#drawer").classList.remove("on"); $("#scrim").classList.remove("on"); }
 
-$("#leftBtn").onclick = () => { route.view === "places" ? openDrawer() : back(); };
+$("#leftBtn").onclick = () => { route.view === "waterbodies" ? openDrawer() : back(); };
 $("#addBtn").onclick = () => {
-  if (route.view === "places") placeSheet(null);
-  else if (route.view === "place"){ const p = findPlace(route.id); if (p) lineSheet(p, null); }
-  else if (route.view === "line"){ const q = $("#qCount"); if (q){ q.focus(); q.scrollIntoView({block:"center"}); } }
+  if (route.view === "waterbodies") waterbodySheet(null);
+  else if (route.view === "waterbody"){ const waterbody = findWaterbody(route.wid); if (waterbody) placeSheet(waterbody, null); }
+  else if (route.view === "place"){ const place = findPlace(route.id); if (place) lineSheet(place, null); }
+  else if (route.view === "line"){ const count = $("#qCount"); if (count){ count.focus(); count.scrollIntoView({block:"center"}); } }
 };
 $("#scrim").onclick = closeDrawer;
-document.querySelectorAll("[data-nav]").forEach(b => b.onclick = () => go(b.dataset.nav));
+document.querySelectorAll("[data-nav]").forEach(button => button.onclick = () => go(button.dataset.nav));
 $("#demoBtn").onclick = () => {
-  const has = DB.places.some(p => p.demo);
-  if (!has) return toast("Демо-мест нет");
-  if (!confirm("Удалить оба демо-места? Ваши места останутся.")) return;
-  DB.places = DB.places.filter(p => !p.demo);
-  DB.presets = DB.presets.filter(p => p.id !== "demo-preset");
+  const has = DB.waterbodies.some(waterbody => waterbody.demo || (waterbody.places||[]).some(place => place.demo));
+  if (!has) return toast("Демо-данных нет");
+  if (!confirm("Удалить демо-водоёмы и демо-места? Ваши данные останутся.")) return;
+  DB.waterbodies = DB.waterbodies
+    .filter(waterbody => !waterbody.demo)
+    .map(waterbody => ({ ...waterbody, places:(waterbody.places||[]).filter(place => !place.demo) }));
+  DB.presets = DB.presets.filter(preset => preset.id !== "demo-preset");
   if (DB.activePreset === "demo-preset") DB.activePreset = null;
-  save(); go("places"); toast("Демо-места удалены");
+  save(); go("waterbodies"); toast("Демо-данные удалены");
 };
 $("#exportBtn").onclick = () => {
   const blob = new Blob([JSON.stringify(DB)], { type:"application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = "рыбалка-" + new Date().toISOString().slice(0,10) + ".json";
-  a.click(); URL.revokeObjectURL(a.href); closeDrawer(); toast("Копия сохранена в файл");
+  const anchor = document.createElement("a");
+  anchor.href = URL.createObjectURL(blob);
+  anchor.download = "рыбалка-" + new Date().toISOString().slice(0,10) + ".json";
+  anchor.click(); URL.revokeObjectURL(anchor.href); closeDrawer(); toast("Копия сохранена в файл");
 };
-function validImport(d){
-  const finite = v => Number.isFinite(Number(v));
-  const reel = s => s && typeof s === "object" &&
-    ["core","width","lineD","lineL"].every(k => finite(s[k])) &&
-    (s.ratio == null || finite(s.ratio));
-  const measure = m => m && typeof m === "object" && typeof m.id === "string" &&
-    finite(m.turns) && finite(m.count);
-  const line = l => l && typeof l === "object" && typeof l.id === "string" &&
-    typeof l.name === "string" && Array.isArray(l.measures) && l.measures.every(measure);
-  const place = p => p && typeof p === "object" && typeof p.id === "string" &&
-    typeof p.name === "string" && (Array.isArray(p.lines) ? p.lines.every(line) :
-      Array.isArray(p.measures) && p.measures.every(measure));
-  const preset = p => p && typeof p === "object" && typeof p.id === "string" &&
-    typeof p.name === "string" && reel(p.data);
-  return d && typeof d === "object" && Array.isArray(d.places) && d.places.every(place) &&
-    (!("reel" in d) || reel(d.reel)) &&
-    (!("presets" in d) || Array.isArray(d.presets) && d.presets.every(preset));
-}
+function validImport(data){ return AppCore.validImport(data); }
 
 $("#importBtn").onclick = () => $("#importFile").click();
 $("#importFile").onchange = e => {
@@ -1554,16 +1771,20 @@ $("#importFile").onchange = e => {
   const fr = new FileReader();
   fr.onload = () => {
     try {
-      const d = JSON.parse(fr.result);
-      if (!validImport(d)) throw 0;
-      DB = Object.assign(DB, d); normalizeDB(); save(); go("places"); toast("Данные загружены");
+      const data = JSON.parse(fr.result);
+      if (!validImport(data)) throw new Error();
+      DB = data; normalizeDB(); save(); go("waterbodies"); toast("Данные загружены");
     } catch(err){ toast("Файл не подходит"); }
   };
   fr.readAsText(f); e.target.value = "";
 };
-window.addEventListener("keydown", e => { if (e.key === "Escape"){ closeModal(); closeDrawer(); } });
-
-load().then(render);
+window.addEventListener("keydown", event => { if (event.key === "Escape"){ closeModal(); closeDrawer(); } });
+Promise.all([load(), loadLakeCatalog()]).then(() => {
+  render();
+  if ("serviceWorker" in navigator){
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+});
 </script>
 </body>
 </html>
