@@ -161,6 +161,19 @@ input[type=file]{display:none}
 .mrow.edit{flex-wrap:wrap}
 .mrow.edit input{height:42px}
 
+/* ---------- Группа замеров на одних оборотах ---------- */
+.mgroup{border:1px solid var(--ridge);border-radius:12px;margin-bottom:8px;background:var(--deep);overflow:hidden}
+.mgroup>.mrow{border:0;border-radius:0;margin:0;background:none}
+.mgroup.open>.ghead{border-bottom:1px solid var(--ridge)}
+.gtoggle{flex:1;min-width:0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0;color:inherit;text-align:left}
+.gtoggle .chev{margin-left:auto;color:var(--mist);font-size:13px;transition:transform .15s}
+.mgroup.open .gtoggle .chev{transform:rotate(180deg)}
+.gbadge{font-family:var(--font-num);font-size:11px;letter-spacing:.06em;color:var(--lure);
+  border:1px solid rgba(240,180,41,.4);border-radius:9px;padding:1px 7px}
+.gspread{font-family:var(--font-num);font-size:11px;color:var(--mist)}
+.gbody{padding:9px 10px 1px;background:rgba(7,23,30,.5)}
+.gbody .mrow{border:1px solid var(--ridge);border-radius:10px;margin-bottom:8px;background:var(--deep)}
+
 /* ---------- Карта дна ---------- */
 .chartwrap{border:1px solid var(--ridge);border-radius:14px;overflow:hidden;background:#061219}
 #chart{display:block;width:100%;height:340px}
@@ -415,6 +428,15 @@ const esc = s => String(s==null?"":s).replace(/[&<>"']/g, c => ({"&":"&amp;","<"
 const num = v => { const n = parseFloat(String(v).replace(",",".")); return isFinite(n) ? n : 0; };
 const fmt = (n,d=1) => (Math.round(n*10**d)/10**d).toLocaleString("ru-RU");
 const inputFmt = (n,d=1) => String(Math.round(n*10**d)/10**d);
+const plural = (n, one, few, many) => {
+  const tail = Math.abs(n) % 10, hundred = Math.abs(n) % 100;
+  if (tail === 1 && hundred !== 11) return one;
+  if (tail >= 2 && tail <= 4 && (hundred < 12 || hundred > 14)) return few;
+  return many;
+};
+// Группы замеров одного луча: точное совпадение оборотов. Только представление,
+// хранилище меняет лишь явное объединение.
+const lineGroups = l => AppCore.groupMeasures(l && l.measures);
 
 let toastTimer;
 function toast(msg){
@@ -540,6 +562,7 @@ function go(view, id, lid, wid){
     const parent = waterbodyForPlace(placeId);
     waterbodyId = parent ? parent.id : null;
   }
+  if (view !== "line" || (lid || null) !== route.lid) openGroups.clear();
   route = { view, id:placeId, lid:lid||null, wid:waterbodyId };
   render(); window.scrollTo(0,0); closeDrawer();
 }
@@ -626,14 +649,14 @@ function viewWaterbody(waterbody){
   <div class="eyebrow">Места: ${places.length}</div>
   ${places.length ? places.map(place => {
     const lines = place.lines || [], total = lines.reduce((sum,line) => sum + (line.measures||[]).length, 0);
-    const best = lines.slice().sort((left,right)=>(right.measures||[]).length-(left.measures||[]).length)[0];
+    const best = lines.map(line => ({ line, points:lineGroups(line).length })).sort((left,right) => right.points - left.points)[0];
     const meta = [lines.length + " луч.", total + " замер.", place.coords ? esc(place.coords) : ""].filter(Boolean).join(" · ");
     return `<button class="card place" data-open="${esc(place.id)}">
       ${place.photo ? `<img class="thumb" src="${esc(place.photo)}" alt="">` : `<div class="thumb ph">◎</div>`}
       <div class="place-main">
         <div class="place-name">${esc(place.name)}</div>
         <div class="place-meta">${meta}</div>
-        ${best && (best.measures||[]).length > 1 ? `<canvas class="spark" data-spark="${esc(place.id)}|${esc(best.id)}"></canvas>` : ""}
+        ${best && best.points > 1 ? `<canvas class="spark" data-spark="${esc(place.id)}|${esc(best.line.id)}"></canvas>` : ""}
       </div>
     </button>`;
   }).join("") : `<div class="empty tiny">Мест пока нет. Нажмите +, чтобы добавить точку ловли.</div>`}
@@ -665,7 +688,7 @@ function lastTurns(l){
 }
 function viewPlace(p){
   const lines = p.lines || [];
-  const ready = lines.filter(l => (l.measures||[]).length >= 2).length;
+  const ready = lines.filter(l => lineGroups(l).length >= 2).length;
   return `
   <div class="card">
     <div style="display:flex;gap:12px;align-items:flex-start">
@@ -688,7 +711,7 @@ function viewPlace(p){
 
   <button class="btn ghost wide" id="addLine" style="margin-top:4px">Добавить луч</button>
   <button class="btn primary wide" id="toTop" style="margin-top:10px;${ready?"":"opacity:.45"}" ${ready?"":"disabled"}>Карта: вид сверху</button>
-  ${ ready ? "" : `<div class="tiny muted" style="text-align:center;margin-top:8px">Нужен хотя бы один луч с двумя замерами</div>` }`;
+  ${ ready ? "" : `<div class="tiny muted" style="text-align:center;margin-top:8px">Нужен хотя бы один луч с замерами на двух разных оборотах</div>` }`;
 }
 function compassBadge(az, big){
   const size = big ? "big" : "";
@@ -698,15 +721,17 @@ function compassBadge(az, big){
   </div>`;
 }
 function lineCard(l){
-  const m = l.measures || [];
-  const meta = [ m.length ? m.length + " замер." : "нет замеров", l.cast ? "заброс " + l.cast + " об." : "",
+  const m = l.measures || [], groups = lineGroups(l);
+  const meta = [ m.length ? m.length + " " + plural(m.length, "замер", "замера", "замеров") : "нет замеров",
+    groups.length < m.length ? groups.length + " " + plural(groups.length, "точка", "точки", "точек") : "",
+    l.cast ? "заброс " + l.cast + " об." : "",
     l.spool ? esc(spoolLabel(l.spool)) : "" ].filter(Boolean).join(" · ");
   return `<button class="card place" data-line="${esc(l.id)}">
     ${compassBadge(l.az)}
     <div class="place-main">
       <div class="place-name">${esc(l.name)}</div>
       <div class="place-meta">${meta}</div>
-      ${ m.length>1 ? `<canvas class="spark" data-lspark="${esc(l.id)}"></canvas>` : "" }
+      ${ groups.length>1 ? `<canvas class="spark" data-lspark="${esc(l.id)}"></canvas>` : "" }
     </div>
   </button>`;
 }
@@ -727,10 +752,13 @@ function afterPlace(p){
 /* ============================================================
    ЭКРАН: ЛУЧ (замеры протяжки)
    ============================================================ */
+let openGroups = new Set();
+const groupKey = (l, group) => l.id + "|" + group.turns;
 function viewLine(p, l){
-  const m = (l.measures || []).slice().sort((a,b) => b.turns - a.turns);
+  const raw = (l.measures || []).slice().sort((a,b) => b.turns - a.turns);
+  const groups = lineGroups(l).sort((a,b) => b.turns - a.turns);
   const clipNo = {};
-  m.filter(x => x.clip).forEach((x,i) => clipNo[x.id] = i+1);
+  raw.filter(x => x.clip).forEach((x,i) => clipNo[x.id] = i+1);
   return `
   <div class="card">
     <div style="display:flex;gap:14px;align-items:center">
@@ -767,16 +795,45 @@ function viewLine(p, l){
     <div class="chips">${MARKS.map(m2=>`<button class="chip mch ${qMark===m2.k?"sel":""}" data-mk="${m2.k}"><i class="mi">${m2.i}</i>${m2.n}</button>`).join("")}</div>
   </div>
 
-  <div class="eyebrow">Замеры: ${m.length}</div>
-  <div id="mlist">${ m.length ? m.map((x,i)=>mrow(x,i,clipNo[x.id])).join("") : `<div class="empty tiny">Пока пусто. Запишите первый замер выше.</div>` }</div>
+  <div class="eyebrow">Замеры: ${raw.length}${ groups.length < raw.length ? " · точек: " + groups.length : "" }</div>
+  <div id="mlist">${ groups.length
+    ? groups.map((group,i) => group.size === 1
+        ? mrow(group.measures[0], String(i+1).padStart(2,"0"), clipNo[group.measures[0].id])
+        : groupCard(l, group, i, clipNo)).join("")
+    : `<div class="empty tiny">Пока пусто. Запишите первый замер выше.</div>` }</div>
 
-  <button class="btn primary wide" id="toChart" style="margin-top:14px;${m.length<2?"opacity:.45":""}" ${m.length<2?"disabled":""}>Профиль дна</button>
-  ${ m.length<2 ? `<div class="tiny muted" style="text-align:center;margin-top:8px">Нужно минимум 2 замера</div>` : "" }`;
+  <button class="btn primary wide" id="toChart" style="margin-top:14px;${groups.length<2?"opacity:.45":""}" ${groups.length<2?"disabled":""}>Профиль дна</button>
+  ${ groups.length<2 ? `<div class="tiny muted" style="text-align:center;margin-top:8px">Нужны замеры минимум на двух разных оборотах</div>` : "" }`;
 }
-function mrow(x, i, clip){
+function groupCard(l, group, i, clipNo){
+  const b = BOT(group.bottom), mk = MRK(group.mark);
+  const open = openGroups.has(groupKey(l, group));
+  const spread = group.minCount === group.maxCount ? "" : `${fmt(group.minCount)}-${fmt(group.maxCount)}`;
+  return `<div class="mgroup${open?" open":""}">
+    <div class="mrow ghead">
+      <button class="gtoggle" data-gtoggle="${esc(group.turns)}" aria-expanded="${open}">
+        <span class="idx num">${String(i+1).padStart(2,"0")}</span>
+        <span class="grow">
+          <span class="val" style="color:var(--shallow)">${fmt(group.turns)}<small>ОБ.</small></span>
+          <span class="val">${fmt(group.count)}<small>СЧЁТ</small></span>
+          <span class="gbadge">×${group.size}</span>
+          ${ spread ? `<span class="gspread">разброс ${spread}</span>` : "" }
+          ${ b ? `<span class="tiny" style="display:flex;align-items:center;gap:6px"><i class="sw" style="background:${b.c}"></i>${b.n}</span>` : "" }
+          ${ mk ? `<span class="tiny muted">${mk.i} ${mk.n}</span>` : "" }
+        </span>
+        <span class="chev">▾</span>
+      </button>
+      <button class="btn sm ghost" data-merge="${esc(group.turns)}">Объединить</button>
+    </div>
+    <div class="gbody" ${open?"":"hidden"}>
+      ${ group.measures.map(x => mrow(x, "", clipNo[x.id])).join("") }
+    </div>
+  </div>`;
+}
+function mrow(x, label, clip){
   const b = BOT(x.bottom), m = MRK(x.mark);
   return `<div class="mrow" data-m="${esc(x.id)}">
-    <div class="idx num">${String(i+1).padStart(2,"0")}</div>
+    <div class="idx num">${esc(label)}</div>
     <div class="grow">
       <div class="val" style="color:var(--shallow)">${fmt(x.turns)}<small>ОБ.</small></div>
       <div class="val">${fmt(x.count)}<small>СЧЁТ</small></div>
@@ -826,7 +883,28 @@ function afterLine(p, l){
     qMark = (qMark === b.dataset.mk) ? null : b.dataset.mk;
     document.querySelectorAll(".mch").forEach(x => x.classList.toggle("sel", x.dataset.mk === qMark));
   });
-  $("#toChart").onclick = () => { if ((l.measures||[]).length >= 2) go("chart", p.id, l.id); };
+  $("#toChart").onclick = () => { if (lineGroups(l).length >= 2) go("chart", p.id, l.id); };
+  document.querySelectorAll("[data-gtoggle]").forEach(b => b.onclick = () => {
+    const wrap = b.closest(".mgroup");
+    const open = !wrap.classList.contains("open");
+    const key = l.id + "|" + b.dataset.gtoggle;
+    if (open) openGroups.add(key); else openGroups.delete(key);
+    wrap.classList.toggle("open", open);
+    b.setAttribute("aria-expanded", String(open));
+    wrap.querySelector(".gbody").hidden = !open;
+  });
+  document.querySelectorAll("[data-merge]").forEach(b => b.onclick = () => {
+    const group = lineGroups(l).find(item => item.turns === Number(b.dataset.merge));
+    if (!group || group.size < 2) return;
+    const word = plural(group.size, "замер", "замера", "замеров");
+    if (!confirm(`Объединить ${group.size} ${word} на ${fmt(group.turns)} об. в один? Сырые замеры будут удалены без возможности вернуть.`)) return;
+    const ids = new Set(group.measures.map(item => item.id));
+    const at = l.measures.findIndex(item => ids.has(item.id));
+    l.measures = l.measures.filter(item => !ids.has(item.id));
+    l.measures.splice(at, 0, AppCore.mergeGroup(group, uid));
+    openGroups.delete(groupKey(l, group));
+    save(); render(); toast("Замеры объединены");
+  });
   document.querySelectorAll("[data-del]").forEach(b => b.onclick = () => {
     l.measures = l.measures.filter(x => x.id !== b.dataset.del); save(); render();
   });
@@ -904,9 +982,9 @@ function afterChart(p, l){
 
 function chartPoints(l){
   const s = spoolForLine(l), toM = DB.chartMeters && !!s;
-  let pts = (l.measures||[]).map(m => ({
-    x: toM ? turnsToMeters(m.turns, s) : m.turns,
-    y: m.count, note: m.note, turns: m.turns, bottom: m.bottom, mark: m.mark
+  const pts = lineGroups(l).map(group => ({
+    x: toM ? turnsToMeters(group.turns, s) : group.turns,
+    y: group.count, note: group.note, turns: group.turns, bottom: group.bottom, mark: group.mark, size: group.size
   })).sort((a,b) => a.x - b.x);
   return { pts, unit: toM ? "м" : "об." };
 }
@@ -1027,7 +1105,7 @@ function niceStep(max, want){
 }
 function drawSpark(cv, l){
   if (!l) return;
-  const pts = (l.measures||[]).slice().sort((a,b)=>a.turns-b.turns);
+  const pts = lineGroups(l).sort((a,b)=>a.turns-b.turns);
   if (pts.length < 2) return;
   const w = cv.clientWidth || 240, h = 34, dpr = window.devicePixelRatio||1;
   cv.width = w*dpr; cv.height = h*dpr;
@@ -1081,7 +1159,7 @@ function afterTop(p){
     let best = null, bd = 28;
     topHit.forEach(h => { const dd = Math.hypot(h.sx-mx, h.sy-my); if (dd < bd){ bd = dd; best = h; } });
     $("#tinfo").innerHTML = best
-      ? `<b>${esc(best.line)}</b> · ${fmt(best.d)} ${best.unit} · счёт <b>${fmt(best.y)}</b>${best.bottom?" · "+BOT(best.bottom).n:""}`
+      ? `<b>${esc(best.line)}</b> · ${fmt(best.d)} ${best.unit} · счёт <b>${fmt(best.y)}</b>${best.size>1?" (среднее ×"+best.size+")":""}${best.bottom?" · "+BOT(best.bottom).n:""}`
       : "Нажмите на точку, чтобы посмотреть замер. Щипок — зум, палец — сдвиг.";
   };
   cv.onclick = e => { const r = cv.getBoundingClientRect(); hit(e.clientX-r.left, e.clientY-r.top); };
@@ -1171,8 +1249,9 @@ function drawTop(cv, p){
   const rays = lines.map((l,i) => ({
     name: l.name, az: l.az,
     rel: (l.az != null && mean != null) ? clamp(angDiff(l.az, mean), -85, 85) : (i - (lines.length-1)/2) * 18,
-    pts: (l.measures||[]).map(m => ({
-      d: toM ? lineDistance(m.turns, l) : m.turns, y: m.count, bottom: m.bottom, mark: m.mark
+    pts: lineGroups(l).map(group => ({
+      d: toM ? lineDistance(group.turns, l) : group.turns,
+      y: group.count, bottom: group.bottom, mark: group.mark, size: group.size
     })).sort((a,b) => a.d - b.d)
   })).sort((a,b) => a.rel - b.rel);
 
@@ -1304,7 +1383,7 @@ function drawTop(cv, p){
       g.beginPath(); g.arc(x, y, 4, 0, 7);
       g.fillStyle = (BOT(q.bottom) || { c:"#EAF4F3" }).c; g.fill();
       g.strokeStyle = "rgba(6,18,25,.8)"; g.lineWidth = 1.3; g.stroke();
-      topHit.push({ sx: x, sy: y, d: q.d, y: q.y, bottom: q.bottom, line: r.name, unit });
+      topHit.push({ sx: x, sy: y, d: q.d, y: q.y, bottom: q.bottom, size: q.size, line: r.name, unit });
       const mk = MRK(q.mark);
       if (mk){
         g.beginPath(); g.arc(x + 9, y - 9, 6.5, 0, 7);
@@ -1435,12 +1514,12 @@ async function afterWaterMap(waterbody){
           radius:6, color:"#07171E", weight:1.5, fillColor:color, fillOpacity:0.96
         }).bindTooltip(
           `<b>${esc(item.place.name)}</b><br>${esc(item.line.name || "Луч")}<br>` +
-          `счёт ${fmt(point.count)}, ${fmt(point.distanceMeters)} м<br>` +
+          `счёт ${fmt(point.count)}${ point.size > 1 ? " (среднее ×" + point.size + ")" : "" }, ${fmt(point.distanceMeters)} м<br>` +
           `<span style="opacity:.75">${esc(spoolLabel(item.spool))}</span>`
         ).addTo(map);
       });
     });
-    const notes = [`Показано мест: ${(waterbody.places||[]).length - missingCoords}`, `замеров: ${counts.length}`];
+    const notes = [`Показано мест: ${(waterbody.places||[]).length - missingCoords}`, `точек: ${counts.length}`];
     if (missingSpool) notes.push(`лучей без снасти: ${missingSpool}`);
     if (missingCoords) notes.push(`без координат: ${missingCoords}`);
     if (missingAzimuth) notes.push(`лучей без азимута: ${missingAzimuth}`);

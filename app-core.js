@@ -68,6 +68,87 @@
     return db;
   }
 
+  function roundHalfStep(value){
+    return Math.round(Number(value) * 2) / 2;
+  }
+
+  // Majority among filled values; empty ones do not vote. Ties go to the newer
+  // measure, i.e. the last one in line order, hence the >= comparison.
+  function majorityValue(measures, key){
+    const tally = new Map();
+    let best = null;
+    measures.forEach(measure => {
+      const value = measure[key];
+      if (value == null || value === "") return;
+      const hits = (tally.get(value) || 0) + 1;
+      tally.set(value, hits);
+      if (!best || hits >= best.hits) best = { value, hits };
+    });
+    return best ? best.value : null;
+  }
+
+  function joinNotes(measures){
+    const notes = [];
+    measures.forEach(measure => {
+      const note = typeof measure.note === "string" ? measure.note.trim() : "";
+      if (note && !notes.includes(note)) notes.push(note);
+    });
+    return notes.join("; ");
+  }
+
+  function numeric(value){
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  // Groups measures of one line by exact turns match. Pure projection: the input
+  // array is never mutated and group order follows first appearance.
+  function groupMeasures(measures){
+    const buckets = new Map();
+    const order = [];
+    (Array.isArray(measures) ? measures : []).forEach(measure => {
+      if (!measure || typeof measure !== "object") return;
+      const turns = Number(measure.turns);
+      if (!Number.isFinite(turns)) return;
+      let bucket = buckets.get(turns);
+      if (!bucket){ bucket = []; buckets.set(turns, bucket); order.push(turns); }
+      bucket.push(measure);
+    });
+    return order.map(turns => {
+      const items = buckets.get(turns);
+      const counts = items.map(item => numeric(item.count));
+      const single = items.length === 1;
+      const newest = items[items.length - 1];
+      return {
+        id:items[0].id,
+        turns,
+        size:items.length,
+        measures:items,
+        count:single ? counts[0] : roundHalfStep(counts.reduce((sum, value) => sum + value, 0) / counts.length),
+        minCount:Math.min(...counts),
+        maxCount:Math.max(...counts),
+        bottom:single ? (newest.bottom || null) : majorityValue(items, "bottom"),
+        mark:single ? (newest.mark || null) : majorityValue(items, "mark"),
+        clip:items.some(item => !!item.clip),
+        note:single ? (newest.note || "") : joinNotes(items)
+      };
+    });
+  }
+
+  // One raw measure replacing the whole group. Caller removes the originals.
+  function mergeGroup(group, idFactory){
+    const makeId = typeof idFactory === "function" ? idFactory : randomId;
+    return {
+      id:makeId(),
+      turns:group.turns,
+      count:group.count,
+      bottom:group.bottom || null,
+      mark:group.mark || null,
+      clip:!!group.clip,
+      note:group.note || ""
+    };
+  }
+
   function finite(value){
     return value !== "" && value !== null && value !== undefined && Number.isFinite(Number(value));
   }
@@ -148,14 +229,15 @@
     place.lines.forEach(line => {
       if (!Number.isFinite(Number(line.az)) || line.az == null || !Array.isArray(line.measures)) return;
       const points = [];
-      line.measures.forEach(measure => {
-        const distanceMeters = Number(distanceForTurns(Number(measure.turns), line));
+      groupMeasures(line.measures).forEach(group => {
+        const distanceMeters = Number(distanceForTurns(group.turns, line));
         if (!(distanceMeters > 0) || !Number.isFinite(distanceMeters)) return;
         const point = destinationPoint(origin, Number(line.az), distanceMeters);
         points.push({
-          measureId:measure.id,
-          count:Number(measure.count),
-          turns:Number(measure.turns),
+          measureId:group.id,
+          count:group.count,
+          turns:group.turns,
+          size:group.size,
           distanceMeters,
           lat:point.lat,
           lon:point.lon
@@ -187,6 +269,8 @@
     validImport,
     parseCoords,
     destinationPoint,
+    groupMeasures,
+    mergeGroup,
     projectSoundings,
     validLakeManifest
   };

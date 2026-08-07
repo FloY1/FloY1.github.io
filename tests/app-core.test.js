@@ -122,6 +122,106 @@ test("projectSoundings проецирует лучи с азимутом и сч
   assert.ok(projected[1].points[0].lon < 0);
 });
 
+test("groupMeasures усредняет счёт с шагом 0.5 и не трогает исходный массив", () => {
+  const measures = [
+    { id:"m1", turns:50, count:24 },
+    { id:"m2", turns:45, count:20 },
+    { id:"m3", turns:50, count:25 },
+    { id:"m4", turns:50, count:26 }
+  ];
+
+  const groups = Core.groupMeasures(measures);
+
+  assert.deepEqual(groups.map(group => group.turns), [50, 45]);
+  assert.equal(groups[0].size, 3);
+  assert.equal(groups[0].count, 25);
+  assert.equal(groups[0].minCount, 24);
+  assert.equal(groups[0].maxCount, 26);
+  assert.equal(groups[1].size, 1);
+  assert.equal(groups[1].count, 20);
+  assert.equal(measures.length, 4);
+
+  const half = Core.groupMeasures([{ id:"a", turns:10, count:24 }, { id:"b", turns:10, count:25 }]);
+  assert.equal(half[0].count, 24.5);
+
+  const quarter = Core.groupMeasures([
+    { id:"a", turns:10, count:24 }, { id:"b", turns:10, count:24 }, { id:"c", turns:10, count:25 }
+  ]);
+  assert.equal(quarter[0].count, 24.5);
+});
+
+test("groupMeasures берёт дно и метку большинством, пустые не голосуют, ничью решает более новый", () => {
+  const majority = Core.groupMeasures([
+    { id:"m1", turns:30, count:10, bottom:"il", mark:null },
+    { id:"m2", turns:30, count:10, bottom:null, mark:"snag" },
+    { id:"m3", turns:30, count:10, bottom:"sand" },
+    { id:"m4", turns:30, count:10, bottom:"sand" }
+  ])[0];
+  assert.equal(majority.bottom, "sand");
+  assert.equal(majority.mark, "snag");
+
+  const tie = Core.groupMeasures([
+    { id:"m1", turns:30, count:10, bottom:"il" },
+    { id:"m2", turns:30, count:10, bottom:"sand" }
+  ])[0];
+  assert.equal(tie.bottom, "sand");
+
+  const empty = Core.groupMeasures([
+    { id:"m1", turns:30, count:10, bottom:null },
+    { id:"m2", turns:30, count:10, bottom:"" }
+  ])[0];
+  assert.equal(empty.bottom, null);
+});
+
+test("groupMeasures из одного замера отдаёт сам замер без округления", () => {
+  const single = Core.groupMeasures([{ id:"m1", turns:30, count:24.2, bottom:"il", note:"вот тут" }])[0];
+
+  assert.equal(single.id, "m1");
+  assert.equal(single.count, 24.2);
+  assert.equal(single.bottom, "il");
+  assert.equal(single.note, "вот тут");
+  assert.equal(single.clip, false);
+});
+
+test("mergeGroup собирает один замер: клипса по ИЛИ, заметки без дублей, новый id", () => {
+  const group = Core.groupMeasures([
+    { id:"m1", turns:50, count:24, bottom:"shell", mark:"spot", note:"держу тут", clip:false },
+    { id:"m2", turns:50, count:25, bottom:"shell", note:"  держу тут  ", clip:true },
+    { id:"m3", turns:50, count:26, bottom:"il", note:"рвал поводок" }
+  ])[0];
+
+  const merged = Core.mergeGroup(group, () => "merged-1");
+
+  assert.deepEqual(merged, {
+    id:"merged-1",
+    turns:50,
+    count:25,
+    bottom:"shell",
+    mark:"spot",
+    clip:true,
+    note:"держу тут; рвал поводок"
+  });
+});
+
+test("projectSoundings отдаёт одну точку на повторные обороты со средним счётом", () => {
+  const place = {
+    id:"p1", coords:"0, 0", lines:[
+      { id:"east", az:90, measures:[
+        { id:"m1", turns:10, count:4 },
+        { id:"m2", turns:10, count:5 },
+        { id:"m3", turns:20, count:9 }
+      ] }
+    ]
+  };
+
+  const points = Core.projectSoundings(place, turns => turns * 10)[0].points;
+
+  assert.equal(points.length, 2);
+  assert.deepEqual(points.map(point => point.turns), [10, 20]);
+  assert.deepEqual(points.map(point => point.count), [4.5, 9]);
+  assert.deepEqual(points.map(point => point.size), [2, 1]);
+});
+
 test("validLakeManifest проверяет локальный XYZ пакет и GeoJSON границу", () => {
   const valid = {
     slug:"demo-lake",
