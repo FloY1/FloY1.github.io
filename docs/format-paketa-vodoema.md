@@ -122,6 +122,16 @@ node tools/lake-package.mjs \
 
 Для готовой границы замените `--osm-id R123456` на `--boundary path/to/boundary.geojson`. Повторный запуск возобновляет загрузку: нужные валидные PNG копируются из активного release в чистый staging без повторного скачивания. Новый `generatedAt` создаёт новый immutable release; прежние release и их precache manifest сохраняются для уже открытых клиентов. Передавайте одинаковый `--generated-at` для побайтово воспроизводимых JSON и `sw.js`; без параметра скрипт использует текущее время. По умолчанию обновляется `sw.js` рядом с каталогом `lakes`; другой путь задаётся через `--service-worker`.
 
+### Обновление оболочки без пересборки пакетов
+
+Первым аргументом скрипт принимает команду: `build` (по умолчанию) собирает пакет водоёма, `restamp` только перевыпускает версию оболочки. `restamp` нужен после любого изменения `index.html`, `app-core.js`, `sw.js`, `manifest.webmanifest`, `icons/` или `vendor/`: без нового `SW_VERSION` установленный service worker продолжит отдавать старую копию из своего cache.
+
+```bash
+node tools/lake-package.mjs restamp
+```
+
+Команда читает текущий `lakes/index.json`, проверяет, что каталоги активных release на месте, и публикует новые `lakes/registry/<release>.json` и `lakes/precache/<release>.json` с прежними пакетами внутри, затем переключает `lakes/index.json` и встраивает новый `generatedAt` в `SW_VERSION`. Тайлы не скачиваются, каталоги `lakes/<slug>/<release>` не меняются. Поддерживаются те же `--generated-at`, `--output` и `--service-worker`. Пустой реестр и отсутствующий каталог активного пакета прерывают команду до записи `sw.js`.
+
 ## Ограничения и оговорки
 
 - Токен и лицензия. Bearer принадлежит подписке by.fishermap.org, не нам. Пакеты публикуются вместе с сайтом ([ADR-0005](adr/0005-publikaciya-paketov-vodoemov.md)); это перераспространение тайлов Navionics, риск ToS и копирайта принят осознанно.

@@ -164,6 +164,63 @@ async function prepareServiceWorker(serviceWorkerPath, generatedAt){
   };
 }
 
+async function readRegistry(outputRoot, generatedAt){
+  const registry = await readJson(path.join(outputRoot, "index.json"), { generatedAt, waterbodies:[] });
+  if (!Array.isArray(registry.waterbodies)) throw new Error("Lake registry must contain waterbodies array");
+  const seenSlugs = new Set();
+  registry.waterbodies.forEach(item => {
+    if (!item || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.slug || "") ||
+        !/^[A-Za-z0-9-]+$/.test(item.release || "") || seenSlugs.has(item.slug)){
+      throw new Error("Lake registry contains an invalid or duplicate release");
+    }
+    seenSlugs.add(item.slug);
+  });
+  return registry;
+}
+
+async function publishRegistry(outputRoot, registry, generatedAt, serviceWorker){
+  const release = releaseFromTimestamp(generatedAt);
+  registry.waterbodies.sort((left, right) => left.name.localeCompare(right.name, "ru"));
+  registry.generatedAt = generatedAt;
+  const prefix = path.basename(outputRoot);
+  const files = [];
+  for (const item of registry.waterbodies){
+    const relativeRoot = `${item.slug}/${item.release}`;
+    const activePackage = path.join(outputRoot, relativeRoot);
+    if (!await pathExists(activePackage)) throw new Error(`Active package ${relativeRoot} is missing`);
+    const packageFiles = await collectFiles(activePackage);
+    packageFiles.forEach(file => files.push(`${prefix}/${relativeRoot}/${file}`));
+  }
+  files.push(`${prefix}/precache/${release}.json`, `${prefix}/registry/${release}.json`);
+  files.sort();
+  const registryText = JSON.stringify(registry, null, 2) + "\n";
+  await writeFileImmutable(path.join(outputRoot, "registry", `${release}.json`), registryText);
+  await writeFileImmutable(
+    path.join(outputRoot, "precache", `${release}.json`),
+    JSON.stringify({ generatedAt, files }, null, 2) + "\n"
+  );
+  await writeFileAtomic(path.join(outputRoot, "index.json"), registryText);
+  if (serviceWorker) await writeFileAtomic(serviceWorker.path, serviceWorker.content);
+  return { release, files };
+}
+
+export async function restampShell(options){
+  const {
+    outputRoot,
+    generatedAt:generatedAtInput = new Date().toISOString(),
+    serviceWorkerPath
+  } = options;
+  if (typeof generatedAtInput !== "string" || Number.isNaN(Date.parse(generatedAtInput))){
+    throw new Error("Generated timestamp must be ISO-8601");
+  }
+  const generatedAt = new Date(generatedAtInput).toISOString();
+  const registry = await readRegistry(outputRoot, generatedAt);
+  if (!registry.waterbodies.length) throw new Error("Lake registry has no published waterbodies");
+  const serviceWorker = await prepareServiceWorker(serviceWorkerPath, generatedAt);
+  const { release, files } = await publishRegistry(outputRoot, registry, generatedAt, serviceWorker);
+  return { release, generatedAt, files };
+}
+
 
 
 async function collectFiles(directory, relative = ""){
@@ -274,17 +331,7 @@ export async function buildLakePackage(options){
     generatedAt
   };
 
-  const registryPath = path.join(outputRoot, "index.json");
-  const registry = await readJson(registryPath, { generatedAt, waterbodies:[] });
-  if (!Array.isArray(registry.waterbodies)) throw new Error("Lake registry must contain waterbodies array");
-  const seenSlugs = new Set();
-  registry.waterbodies.forEach(item => {
-    if (!item || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(item.slug || "") ||
-        !/^[A-Za-z0-9-]+$/.test(item.release || "") || seenSlugs.has(item.slug)){
-      throw new Error("Lake registry contains an invalid or duplicate release");
-    }
-    seenSlugs.add(item.slug);
-  });
+  const registry = await readRegistry(outputRoot, generatedAt);
   const serviceWorker = await prepareServiceWorker(serviceWorkerPath, generatedAt);
   const existingIndex = registry.waterbodies.findIndex(item => item.slug === slug);
   const existing = existingIndex >= 0 ? registry.waterbodies[existingIndex] : null;
@@ -320,31 +367,7 @@ export async function buildLakePackage(options){
   const summary = { slug, release, name:manifest.name, type, center:manifest.center, bbox };
   if (existingIndex >= 0) registry.waterbodies[existingIndex] = summary;
   else registry.waterbodies.push(summary);
-  registry.waterbodies.sort((left, right) => left.name.localeCompare(right.name, "ru"));
-  registry.generatedAt = generatedAt;
-
-  const prefix = path.basename(outputRoot);
-  const files = [];
-  for (const item of registry.waterbodies){
-    const relativeRoot = `${item.slug}/${item.release}`;
-    const activePackage = path.join(outputRoot, relativeRoot);
-    if (!await pathExists(activePackage)) throw new Error(`Active package ${relativeRoot} is missing`);
-    const packageFiles = await collectFiles(activePackage);
-    packageFiles.forEach(file => files.push(`${prefix}/${relativeRoot}/${file}`));
-  }
-  const precacheRelative = `${prefix}/precache/${release}.json`;
-  const registryRelative = `${prefix}/registry/${release}.json`;
-  files.push(precacheRelative, registryRelative);
-  files.sort();
-
-  const registryText = JSON.stringify(registry, null, 2) + "\n";
-  await writeFileImmutable(path.join(outputRoot, "registry", `${release}.json`), registryText);
-  await writeFileImmutable(
-    path.join(outputRoot, "precache", `${release}.json`),
-    JSON.stringify({ generatedAt, files }, null, 2) + "\n"
-  );
-  await writeFileAtomic(registryPath, registryText);
-  if (serviceWorker) await writeFileAtomic(serviceWorker.path, serviceWorker.content);
+  await publishRegistry(outputRoot, registry, generatedAt, serviceWorker);
   return { manifest, tileCount:tiles.length, downloaded };
 }
 
@@ -360,7 +383,23 @@ function parseArgs(argv){
 }
 
 async function main(){
-  const args = parseArgs(process.argv.slice(2));
+  const argv = process.argv.slice(2);
+  const command = argv[0] && !argv[0].startsWith("--") ? argv.shift() : "build";
+  const args = parseArgs(argv);
+  const outputRoot = path.resolve(args.output || "lakes");
+  const serviceWorkerPath = args["service-worker"]
+    ? path.resolve(args["service-worker"])
+    : path.resolve(outputRoot, "..", "sw.js");
+  if (command === "restamp"){
+    const restamped = await restampShell({
+      outputRoot,
+      generatedAt:args["generated-at"] || undefined,
+      serviceWorkerPath
+    });
+    console.log(`Shell release ${restamped.release}: ${restamped.files.length} precached files`);
+    return;
+  }
+  if (command !== "build") throw new Error(`Unknown command ${command}`);
   let geometry;
   if (args.boundary){
     const boundary = JSON.parse(await readFile(args.boundary, "utf8"));
@@ -372,10 +411,6 @@ async function main(){
   } else {
     throw new Error("Pass --boundary <file.geojson> or --osm-id <R123>");
   }
-  const outputRoot = path.resolve(args.output || "lakes");
-  const serviceWorkerPath = args["service-worker"]
-    ? path.resolve(args["service-worker"])
-    : path.resolve(outputRoot, "..", "sw.js");
   const result = await buildLakePackage({
     slug:args.slug,
     name:args.name,

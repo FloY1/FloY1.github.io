@@ -8,7 +8,8 @@ import {
   bboxFromGeometry,
   tilesForBbox,
   fetchOsmBoundary,
-  buildLakePackage
+  buildLakePackage,
+  restampShell
 } from "../tools/lake-package.mjs";
 
 const PNG_1X1 = Buffer.from(
@@ -178,4 +179,56 @@ test("buildLakePackage скачивает PNG с авторизацией и с�
   await writeFile(registryPath, "{");
   await assert.rejects(() => buildLakePackage(updatedOptions), SyntaxError);
   assert.equal(await readFile(registryPath, "utf8"), "{");
+});
+
+test("restampShell выпускает новую версию оболочки, не трогая пакеты", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-restamp-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const outputRoot = path.join(root, "lakes");
+  const serviceWorkerPath = path.join(root, "sw.js");
+  const packageRelease = "2026-08-06T00-00-00-000Z";
+  const packageDir = path.join(outputRoot, "demo-lake", packageRelease);
+  await mkdir(path.join(packageDir, "tiles/0/0"), { recursive:true });
+  await writeFile(path.join(packageDir, "tiles/0/0/0.png"), PNG_1X1);
+  await writeFile(path.join(packageDir, "lake.json"), JSON.stringify({ slug:"demo-lake", release:packageRelease }));
+  await writeFile(path.join(outputRoot, "index.json"), JSON.stringify({
+    generatedAt:"2026-08-06T00:00:00.000Z",
+    waterbodies:[{ slug:"demo-lake", release:packageRelease, name:"Демо-озеро", type:"lake", center:[0,0], bbox:[-1,-1,1,1] }]
+  }, null, 2) + "\n");
+  await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "2026-08-06T00:00:00.000Z";\n');
+
+  const result = await restampShell({
+    outputRoot,
+    generatedAt:"2026-08-07T10:00:00.000Z",
+    serviceWorkerPath
+  });
+
+  const shellRelease = "2026-08-07T10-00-00-000Z";
+  assert.equal(result.release, shellRelease);
+  const registryText = await readFile(path.join(outputRoot, "index.json"), "utf8");
+  const registry = JSON.parse(registryText);
+  assert.equal(registry.generatedAt, "2026-08-07T10:00:00.000Z");
+  assert.deepEqual(registry.waterbodies.map(item => item.release), [packageRelease]);
+  assert.equal(await readFile(path.join(outputRoot, "registry", `${shellRelease}.json`), "utf8"), registryText);
+  const precache = JSON.parse(await readFile(path.join(outputRoot, "precache", `${shellRelease}.json`), "utf8"));
+  assert.deepEqual(precache.files, [
+    `lakes/demo-lake/${packageRelease}/lake.json`,
+    `lakes/demo-lake/${packageRelease}/tiles/0/0/0.png`,
+    `lakes/precache/${shellRelease}.json`,
+    `lakes/registry/${shellRelease}.json`
+  ]);
+  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-07T10:00:00.000Z";/);
+  assert.deepEqual(await readFile(path.join(packageDir, "tiles/0/0/0.png")), PNG_1X1);
+
+  await rm(path.join(outputRoot, "demo-lake"), { recursive:true, force:true });
+  await assert.rejects(
+    () => restampShell({ outputRoot, generatedAt:"2026-08-07T11:00:00.000Z", serviceWorkerPath }),
+    /Active package demo-lake/
+  );
+  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-07T10:00:00.000Z";/);
+  await writeFile(path.join(outputRoot, "index.json"), JSON.stringify({ generatedAt:"2026-08-06T00:00:00.000Z", waterbodies:[] }) + "\n");
+  await assert.rejects(
+    () => restampShell({ outputRoot, generatedAt:"2026-08-07T11:00:00.000Z", serviceWorkerPath }),
+    /no published waterbodies/
+  );
 });

@@ -225,6 +225,7 @@ input[type=file]{display:none}
 #drawer.on{transform:none}
 .brand{font-family:var(--font-num);font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--lure);margin:2px 6px 16px}
 .mitem{display:flex;align-items:center;gap:12px;padding:13px 12px;border-radius:11px;width:100%;text-align:left;font-size:15.5px}
+.mitem[hidden]{display:none}
 .mitem:active,.mitem.on{background:var(--shelf)}
 .mitem svg{width:19px;height:19px;flex:0 0 19px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--shallow)}
 .drawer-foot{margin-top:auto;font-size:11.5px;color:var(--mist);padding:0 8px;line-height:1.5}
@@ -277,6 +278,7 @@ input[type=file]{display:none}
   <button class="mitem" id="exportBtn"><svg viewBox="0 0 24 24"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v3h16v-3"/></svg>Сохранить копию</button>
   <button class="mitem" id="importBtn"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4M4 17v3h16v-3"/></svg>Загрузить копию</button>
   <input type="file" id="importFile" accept="application/json,.json">
+  <button class="mitem" id="installBtn"><svg viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M12 7.5v6m0 0l-2.5-2.5M12 13.5l2.5-2.5"/></svg>Установить на телефон</button>
   <div class="drawer-foot">Данные хранятся только в этом телефоне.<br>Интернет не нужен.</div>
 </aside>
 
@@ -1782,6 +1784,41 @@ $("#importFile").onchange = e => {
   };
   fr.readAsText(f); e.target.value = "";
 };
+
+/* ---------- Установка на домашний экран ---------- */
+let installEvent = null;
+const installedApp = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+function syncInstall(){ $("#installBtn").hidden = installedApp(); }
+function installSheet(){
+  const modal = $("#modal");
+  const apple = /iPad|iPhone|iPod/.test(navigator.userAgent)
+    || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const steps = apple
+    ? ["Откройте эту страницу в Safari", "Нажмите «Поделиться» на нижней панели", "Выберите «На экран «Домой»»", "Нажмите «Добавить»"]
+    : ["Откройте меню браузера", "Выберите «Установить приложение» или «Добавить на главный экран»", "Подтвердите добавление"];
+  modal.innerHTML = `<div class="sheet">
+    <div class="grab"></div>
+    <h2>Установить на телефон</h2>
+    <ol style="margin:0 0 12px;padding-left:20px;font-size:14px;line-height:1.6">${steps.map(step => `<li>${step}</li>`).join("")}</ol>
+    <div class="tiny muted" style="margin-bottom:12px">После установки приложение открывается с домашнего экрана и работает без интернета.</div>
+    <div class="row"><button class="btn primary" id="installOk">Понятно</button></div>
+  </div>`;
+  modal.classList.add("on");
+  modal.onclick = event => { if (event.target === modal) closeModal(); };
+  $("#installOk").onclick = closeModal;
+}
+window.addEventListener("beforeinstallprompt", event => { event.preventDefault(); installEvent = event; syncInstall(); });
+window.addEventListener("appinstalled", () => { installEvent = null; $("#installBtn").hidden = true; toast("Приложение добавлено на экран"); });
+$("#installBtn").onclick = async () => {
+  closeDrawer();
+  if (!installEvent) return installSheet();
+  const event = installEvent;
+  installEvent = null;
+  event.prompt();
+  const choice = await event.userChoice;
+  if (choice.outcome !== "accepted") toast("Установка отменена");
+};
+syncInstall();
 window.addEventListener("keydown", event => { if (event.key === "Escape"){ closeModal(); closeDrawer(); } });
 Promise.all([load(), loadLakeCatalog()]).then(() => {
   render();
