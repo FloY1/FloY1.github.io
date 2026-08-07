@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import vm from "node:vm";
 import { readFile } from "node:fs/promises";
 
-const SW_VERSION = "2026-08-06T12:04:00.000Z";
-const RELEASE = "2026-08-06T12-04-00-000Z";
-const CACHE_NAME = `echo-map-${SW_VERSION}`;
 const source = await readFile(new URL("../sw.js", import.meta.url), "utf8");
+const SW_VERSION = source.match(/const SW_VERSION = "([^"]+)";/)[1];
+const RELEASE = SW_VERSION.replace(/[:.]/g, "-");
+const CACHE_NAME = `echo-map-${SW_VERSION}`;
 
 function absoluteKey(input){
   return new URL(typeof input === "string" ? input : input.url, "http://site.test/").href;
@@ -71,7 +71,7 @@ function runFetch(listener, request){
 }
 
 test("service worker отклоняет install с несовпавшей опубликованной версией", async () => {
-  const runtime = createRuntime("2026-08-06T12:05:00.000Z");
+  const runtime = createRuntime(new Date(Date.parse(SW_VERSION) + 60000).toISOString());
 
   await assert.rejects(
     runWaitUntil(runtime.listeners.get("install")),

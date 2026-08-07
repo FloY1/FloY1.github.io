@@ -82,16 +82,29 @@
 
 Все шаги - на этапе разработки, скриптом. Нужен временный доступ к Navionics через активную сессию by.fishermap.org.
 
-1. Граница из OSM. Передать relation id в формате `R123` через `--osm-id`; скрипт получает `Polygon`/`MultiPolygon` из Nominatim lookup. Альтернатива - заранее подготовленный GeoJSON через `--boundary`.
+1. Граница из OSM. Передать OSM id в формате `R123`, `W123` или `N123` через `--osm-id`; скрипт получает `Polygon`/`MultiPolygon` из Nominatim lookup. Альтернатива - заранее подготовленный GeoJSON через `--boundary`.
 2. bbox и список тайлов. Из границы посчитать `bbox`; на выбранном зуме `Z` получить множество тайлов `z/x/y`, покрывающих `bbox`.
-3. Скачать тайлы. Запрос `https://tile1.navionics.com/viewer/api/v1/tile/{z}/{x}/{y}?config=<JWT>&transparent=true&du=1&layer=1` с заголовками `authorization: Bearer <token>` и `origin`/`referer: https://by.fishermap.org`. `config` - статичный JWT продукта (`rpn`, `apr`); `Bearer` живёт 2 часа, обновлять из devtools перед прогоном. Скрипт пропускает уже скачанные валидные PNG и ограничивает параллелизм.
+3. Скачать тайлы. Запрос `https://tile1.navionics.com/viewer/api/v1/tile/{z}/{x}/{y}?config=<JWT>&transparent=true&du=1&layer=1` с заголовками `authorization: Bearer <token>` и `origin`/`referer: https://by.fishermap.org`. `config` - статичный JWT продукта (`rpn`, `apr`); `Bearer` живёт 2 часа. Скрипт пропускает уже скачанные валидные PNG и ограничивает параллелизм.
 4. Чистый staging. Для требуемых `z/x/y` переиспользовать валидные PNG из опубликованного пакета, остальные скачать во временный каталог. Записать туда `lake.json`; старые тайлы, которых нет в новом bbox/zoom, в staging не попадают.
 5. Публикация immutable release. После полной готовности staging одним `rename` публикуется как новый каталог `lakes/<slug>/<release>`. Затем публикуются immutable снимок `lakes/registry/<release>.json` и список `lakes/precache/<release>.json`; как commit marker атомарно заменяется `lakes/index.json` с активным `release`. До смены реестра старый пакет остаётся доступен; после смены реестра приложение получает только уже опубликованный каталог. Повреждённый существующий реестр останавливает сборку и не перезаписывается.
 6. Service worker. Сборщик последним встраивает `generatedAt` в `SW_VERSION` файла `sw.js`; из версии worker получает пути к своим immutable precache и registry. До начала и перед завершением установки worker сверяет опубликованный `lakes/index.json` со своей версией и прерывает install при несовпадении. Versioned registry кэшируется под ключом `lakes/index.json`, поэтому поздняя установка старой версии не смешивает старые пакеты с новым реестром. Новый worker ждёт закрытия вкладок под управлением старой версии, затем удаляет старый Cache Storage. `skipWaiting()` и `clients.claim()` не используются, поэтому открытая вкладка не меняет набор ресурсов посреди сессии. Управляемое приложение обслуживает same-origin GET только из текущего precache; сетевого runtime fallback нет. Старые release остаются на диске для безопасной установки ранее загруженного worker и удаляются только отдельной осознанной процедурой.
 
 ### Запуск сборщика
 
-Токены лучше передавать через окружение, чтобы они не попали в историю команд и репозиторий:
+Свежий `Bearer` выдаёт сама by.fishermap.org: авторизованная сессия отвечает на `POST /api/navionics-auth` полем `tokens["access-token"]`. Значения `auth_token`, `XSRF-TOKEN`, `fishermaporg_session` и `cf_clearance` берутся из devtools вкладки с картой глубин:
+
+```bash
+curl -s -X POST 'https://by.fishermap.org/api/navionics-auth' \
+  -H "authorization: Bearer $FISHERMAP_TOKEN" \
+  -H "x-xsrf-token: $FISHERMAP_XSRF" \
+  -H 'x-requested-with: XMLHttpRequest' \
+  -H 'origin: https://by.fishermap.org' \
+  -H 'referer: https://by.fishermap.org/depth-map/' \
+  -b "auth_token=$FISHERMAP_TOKEN; XSRF-TOKEN=$FISHERMAP_XSRF; fishermaporg_session=$FISHERMAP_SESSION; cf_clearance=$FISHERMAP_CLEARANCE" \
+  | jq -r '.tokens["access-token"]'
+```
+
+Токены передавайте через окружение, чтобы они не попали в историю команд и репозиторий:
 
 ```bash
 export NAVIONICS_CONFIG='<config JWT>'
@@ -102,7 +115,7 @@ node tools/lake-package.mjs \
   --name Нарочь \
   --type lake \
   --osm-id R123456 \
-  --zoom 16 \
+  --zoom 18 \
   --generated-at 2026-08-06T12:00:00.000Z \
   --output lakes
 ```
@@ -111,8 +124,8 @@ node tools/lake-package.mjs \
 
 ## Ограничения и оговорки
 
-- Токен и лицензия. Bearer принадлежит подписке by.fishermap.org, не нам. Использование личное; перераспространение тайлов Navionics нарушает ToS и копирайт. Пакеты не публиковать.
-- Максимальный зум. Тариф `standard_tier` имеет потолок зума; на момент написания не подтверждён (токен истёк при проверке). Проверить свежим токеном; целиться в самый тонкий родной зум (ориентир z16 ~ 1.47 м/px).
+- Токен и лицензия. Bearer принадлежит подписке by.fishermap.org, не нам. Пакеты публикуются вместе с сайтом ([ADR-0005](adr/0005-publikaciya-paketov-vodoemov.md)); это перераспространение тайлов Navionics, риск ToS и копирайта принят осознанно.
+- Максимальный зум. Потолок тарифа `standard_tier` - `z18` (`z19` отвечает `403`). Строить на `z18`: это самый тонкий родной зум (~0.37 м/px на широте 52°). При смене тарифа перепроверить свежим токеном.
 - Река. v1 не строит пакеты для рек (открытая геометрия, огромный bbox). Тип зарезервирован в модели.
 - Атрибуция. Показывать `attribution` на карте (требование источников).
 - Сравнение глубин. Приложение мерит «счёт» (эхо-отсчёт), Navionics - метры; наложение сравнивает прежде всего пространственно (где бровка/яма относительно изобат), а не численно.

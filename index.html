@@ -424,6 +424,10 @@ function findWaterbody(id){ return DB.waterbodies.find(waterbody => waterbody.id
 function findPlace(id){ return allPlaces().find(place => place.id === id); }
 function waterbodyForPlace(id){ return DB.waterbodies.find(waterbody => (waterbody.places||[]).some(place => place.id === id)); }
 function waterbodyTypeName(type){ return ({ lake:"Озеро", reservoir:"Водохранилище", river:"Река", unassigned:"Без типа" })[type] || "Водоём"; }
+function packageName(slug){
+  const entry = LAKE_CATALOG.find(item => item && item.slug === slug);
+  return entry && typeof entry.name === "string" ? entry.name : slug;
+}
 
 /* ---- Дно и метки ---- */
 const BOTTOM = [
@@ -586,7 +590,7 @@ function viewWaterbody(waterbody){
       <h2>${esc(waterbody.name)}</h2>
       <span class="waterbody-kind">${esc(waterbodyTypeName(waterbody.type))}</span>
     </div>
-    <div class="tiny muted" style="margin-top:6px">${waterbody.packageSlug ? "Пакет батиметрии: " + esc(waterbody.packageSlug) : "Пакет батиметрии не привязан"}</div>
+    <div class="tiny muted" style="margin-top:6px">${waterbody.packageSlug ? "Пакет батиметрии: " + esc(packageName(waterbody.packageSlug)) : "Пакет батиметрии не привязан"}</div>
     <div class="row" style="margin-top:12px">
       <button class="btn sm ghost" id="editWaterbody">Изменить</button>
       <button class="btn sm ghost danger" id="delWaterbody">Удалить</button>
