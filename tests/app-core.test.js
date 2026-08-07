@@ -28,6 +28,7 @@ test("normalizeDatabase переносит legacy places в водоём Без 
   assert.equal(result.waterbodies[0].places[0].id, "p1");
   assert.equal(result.waterbodies[0].places[0].lines[0].id, "line-1");
   assert.equal(result.waterbodies[0].places[0].lines[0].measures[0].id, "m1");
+  assert.equal(result.waterbodies[0].places[0].lines[0].spool, null);
 });
 
 test("normalizeDatabase сохраняет существующую иерархию водоёмов", () => {
@@ -54,6 +55,18 @@ test("validImport проверяет каждую присутствующую �
     }]}],
     reel
   }), true);
+  assert.equal(Core.validImport({
+    waterbodies:[{ id:"w1", name:"Нарочь", type:"lake", places:[{
+      id:"p1", name:"Пирс", lines:[{ id:"l1", name:"На яму", measures:[],
+        spool:{ name:"Феникс 4000", size:"4000", core:38, width:16, ratio:5.2, lineD:0.25, lineL:150 } }]
+    }]}]
+  }), true);
+  assert.equal(Core.validImport({
+    waterbodies:[{ id:"w1", name:"Нарочь", type:"lake", places:[{
+      id:"p1", name:"Пирс", lines:[{ id:"l1", name:"На яму", measures:[],
+        spool:{ core:"толстая", width:16, lineD:0.25, lineL:150 } }]
+    }]}]
+  }), false);
   assert.equal(Core.validImport({
     waterbodies:[{ id:"w1", name:"Нарочь", type:"lake", places:[{
       id:"p1", name:"Пирс", lines:[{ id:"l1", name:"На яму", measures:[{ id:"m1", turns:"нет", count:6 }] }]
@@ -86,20 +99,27 @@ test("destinationPoint переносит точку на восток по аз
   assert.ok(Math.abs(point.lon - 0.0089932) < 1e-5);
 });
 
-test("projectSoundings проецирует только лучи с азимутом", () => {
+test("projectSoundings проецирует лучи с азимутом и считает каждый своей снастью", () => {
   const place = {
     id:"p1", coords:"0, 0", lines:[
       { id:"east", az:90, measures:[{ id:"m1", turns:10, count:4 }] },
-      { id:"unknown", az:null, measures:[{ id:"m2", turns:20, count:8 }] }
+      { id:"west", az:270, spool:{ name:"тяжёлая" }, measures:[{ id:"m2", turns:10, count:5 }] },
+      { id:"unknown", az:null, measures:[{ id:"m3", turns:20, count:8 }] }
     ]
   };
 
-  const projected = Core.projectSoundings(place, turns => turns * 10);
+  const seen = [];
+  const projected = Core.projectSoundings(place, (turns, line) => {
+    seen.push(line.id);
+    return line.spool ? turns * 25 : turns * 10;
+  });
 
-  assert.equal(projected.length, 1);
-  assert.equal(projected[0].lineId, "east");
+  assert.deepEqual(seen, ["east", "west"]);
+  assert.deepEqual(projected.map(item => item.lineId), ["east", "west"]);
   assert.equal(projected[0].points[0].distanceMeters, 100);
+  assert.equal(projected[1].points[0].distanceMeters, 250);
   assert.ok(projected[0].points[0].lon > 0);
+  assert.ok(projected[1].points[0].lon < 0);
 });
 
 test("validLakeManifest проверяет локальный XYZ пакет и GeoJSON границу", () => {

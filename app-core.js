@@ -26,6 +26,7 @@
     place.lines.forEach(line => {
       if (!Array.isArray(line.measures)) line.measures = [];
       if (line.az === undefined) line.az = null;
+      if (line.spool === undefined) line.spool = null;
     });
     return place;
   }
@@ -79,9 +80,13 @@
     const measure = item => item && typeof item === "object" && id(item.id) &&
       finite(item.turns) && finite(item.count) &&
       (item.note == null || typeof item.note === "string");
+    const spool = value => value == null || (reel(value) &&
+      (value.name == null || typeof value.name === "string") &&
+      (value.size == null || typeof value.size === "string"));
     const line = item => item && typeof item === "object" && id(item.id) &&
       typeof item.name === "string" && Array.isArray(item.measures) && item.measures.every(measure) &&
-      (item.az == null || finite(item.az)) && (item.cast == null || finite(item.cast));
+      (item.az == null || finite(item.az)) && (item.cast == null || finite(item.cast)) &&
+      spool(item.spool);
     const place = item => item && typeof item === "object" && id(item.id) &&
       typeof item.name === "string" && (item.coords == null || typeof item.coords === "string") &&
       (item.comment == null || typeof item.comment === "string") &&
@@ -144,7 +149,7 @@
       if (!Number.isFinite(Number(line.az)) || line.az == null || !Array.isArray(line.measures)) return;
       const points = [];
       line.measures.forEach(measure => {
-        const distanceMeters = Number(distanceForTurns(Number(measure.turns)));
+        const distanceMeters = Number(distanceForTurns(Number(measure.turns), line));
         if (!(distanceMeters > 0) || !Number.isFinite(distanceMeters)) return;
         const point = destinationPoint(origin, Number(line.az), distanceMeters);
         points.push({

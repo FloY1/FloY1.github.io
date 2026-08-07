@@ -501,6 +501,29 @@ function activeSpool(){
   if (DB.activePreset){ const p = DB.presets.find(p=>p.id===DB.activePreset); if (p) return p.data; }
   return DB.reel;
 }
+function spoolForLine(l){
+  if (l && l.spool && spoolOK(l.spool)) return l.spool;
+  const s = activeSpool();
+  return spoolOK(s) ? s : null;
+}
+function lineDistance(turns, l){
+  const s = spoolForLine(l);
+  return s ? turnsToMeters(turns, s) : 0;
+}
+function spoolLabel(s){
+  if (!s) return "снасть не настроена";
+  return s.name || `шпуля ${s.size}, леска ${fmt(s.lineD,2)} мм`;
+}
+function placeSpools(p){
+  const spools = (p.lines||[]).filter(l => (l.measures||[]).length).map(spoolForLine);
+  return spools.length && spools.every(Boolean) ? spools : null;
+}
+function placeSpoolLabel(p){
+  const spools = placeSpools(p);
+  if (!spools) return null;
+  const names = new Set(spools.map(spoolLabel));
+  return names.size === 1 ? names.values().next().value : "у каждого луча своя";
+}
 
 /* ============================================================
    НАВИГАЦИЯ
@@ -676,7 +699,8 @@ function compassBadge(az, big){
 }
 function lineCard(l){
   const m = l.measures || [];
-  const meta = [ m.length ? m.length + " замер." : "нет замеров", l.cast ? "заброс " + l.cast + " об." : "" ].filter(Boolean).join(" · ");
+  const meta = [ m.length ? m.length + " замер." : "нет замеров", l.cast ? "заброс " + l.cast + " об." : "",
+    l.spool ? esc(spoolLabel(l.spool)) : "" ].filter(Boolean).join(" · ");
   return `<button class="card place" data-line="${esc(l.id)}">
     ${compassBadge(l.az)}
     <div class="place-main">
@@ -713,7 +737,7 @@ function viewLine(p, l){
       ${compassBadge(l.az, true)}
       <div style="flex:1;min-width:0">
         <h2>${esc(l.name)}</h2>
-        <div class="tiny muted" style="margin-top:3px">${ l.az==null ? "направление не задано" : "азимут " + l.az + "°" }</div>
+        <div class="tiny muted" style="margin-top:3px">${ l.az==null ? "направление не задано" : "азимут " + l.az + "°" } · ${esc(spoolLabel(spoolForLine(l)))}${ l.spool ? "" : " (общая)" }</div>
       </div>
     </div>
     <div class="row" style="margin-top:12px">
@@ -854,7 +878,7 @@ function editRow(l, id){
    ЭКРАН: КАРТА ДНА
    ============================================================ */
 function viewChart(p, l){
-  const s = activeSpool(), can = spoolOK(s);
+  const s = spoolForLine(l), can = !!s;
   return `
   <div class="chartwrap">
     <canvas id="chart"></canvas>
@@ -863,7 +887,7 @@ function viewChart(p, l){
   <div class="card" style="margin-top:12px;padding:0">
     <div class="switch">
       <div><div style="font-size:15px">Дальность в метрах</div>
-        <div class="tiny muted">${ can ? "по катушке: " + esc(s.size) + ", леска " + fmt(s.lineD,2) + " мм" : "заполните калькулятор катушки" }</div></div>
+        <div class="tiny muted">${ can ? "по снасти: " + esc(spoolLabel(s)) : "заполните калькулятор катушки" }</div></div>
       <button class="toggle" id="tMeters" aria-pressed="${DB.chartMeters && can}" ${can?"":"disabled"}></button>
     </div>
   </div>
@@ -879,7 +903,7 @@ function afterChart(p, l){
 }
 
 function chartPoints(l){
-  const s = activeSpool(), toM = DB.chartMeters && spoolOK(s);
+  const s = spoolForLine(l), toM = DB.chartMeters && !!s;
   let pts = (l.measures||[]).map(m => ({
     x: toM ? turnsToMeters(m.turns, s) : m.turns,
     y: m.count, note: m.note, turns: m.turns, bottom: m.bottom, mark: m.mark
@@ -1022,7 +1046,7 @@ function drawSpark(cv, l){
    ============================================================ */
 let topFull = false, topHit = [], topZoom = 1, topPanX = 0, topPanY = 0;
 function viewTop(p){
-  const s = activeSpool(), can = spoolOK(s);
+  const label = placeSpoolLabel(p), can = !!label;
   return `
   <div class="chartwrap ${topFull?"full":""}" id="topwrap">
     <canvas id="topmap"></canvas>
@@ -1038,7 +1062,7 @@ function viewTop(p){
   <div class="card" style="margin-top:12px;padding:0">
     <div class="switch">
       <div><div style="font-size:15px">Дальность в метрах</div>
-        <div class="tiny muted">${ can ? "по катушке: " + esc(s.size) + ", леска " + fmt(s.lineD,2) + " мм" : "заполните калькулятор катушки" }</div></div>
+        <div class="tiny muted">${ can ? "по снасти: " + esc(label) : "заполните калькулятор катушки" }</div></div>
       <button class="toggle" id="tMeters" aria-pressed="${DB.chartMeters && can}" ${can?"":"disabled"}></button>
     </div>
   </div>
@@ -1130,7 +1154,7 @@ const rampCSS = t => { const c = rampRGB(t); return `rgb(${c[0]},${c[1]},${c[2]}
 const EDGE = 9;   // на сколько градусов заливка выходит за крайние лучи
 
 function drawTop(cv, p){
-  const sp = activeSpool(), toM = DB.chartMeters && spoolOK(sp);
+  const toM = DB.chartMeters && !!placeSpools(p);
   const lines = (p.lines||[]).filter(l => (l.measures||[]).length);
   const w = cv.clientWidth || 320;
   const dpr = window.devicePixelRatio || 1;
@@ -1148,7 +1172,7 @@ function drawTop(cv, p){
     name: l.name, az: l.az,
     rel: (l.az != null && mean != null) ? clamp(angDiff(l.az, mean), -85, 85) : (i - (lines.length-1)/2) * 18,
     pts: (l.measures||[]).map(m => ({
-      d: toM ? turnsToMeters(m.turns, sp) : m.turns, y: m.count, bottom: m.bottom, mark: m.mark
+      d: toM ? lineDistance(m.turns, l) : m.turns, y: m.count, bottom: m.bottom, mark: m.mark
     })).sort((a,b) => a.d - b.d)
   })).sort((a,b) => a.rel - b.rel);
 
@@ -1375,21 +1399,26 @@ async function afterWaterMap(waterbody){
     }).addTo(map);
     map.fitBounds(boundaryLayer.getBounds(), { padding:[12,12] });
 
-    const spool = activeSpool();
-    const canProject = spoolOK(spool);
     const projected = [];
     let missingCoords = 0;
     let missingAzimuth = 0;
+    let missingSpool = 0;
     (waterbody.places||[]).forEach(place => {
       const origin = AppCore.parseCoords(place.coords);
       if (!origin){ missingCoords++; return; }
       L.circleMarker([origin.lat,origin.lon], {
         radius:7, color:"#07171E", weight:2, fillColor:"#F0B429", fillOpacity:1
       }).bindTooltip(`<b>${esc(place.name)}</b><br>место ловли`).addTo(map);
-      if (!canProject) return;
       missingAzimuth += (place.lines||[]).filter(line => (line.measures||[]).length && line.az == null).length;
-      AppCore.projectSoundings(place, turns => turnsToMeters(turns, spool)).forEach(line => {
-        projected.push({ place, line, points:line.points.slice().sort((left,right) => left.distanceMeters - right.distanceMeters) });
+      missingSpool += (place.lines||[]).filter(line => (line.measures||[]).length && !spoolForLine(line)).length;
+      AppCore.projectSoundings(place, lineDistance).forEach(line => {
+        const source = (place.lines||[]).find(item => item.id === line.lineId);
+        projected.push({
+          place,
+          line,
+          spool:spoolForLine(source),
+          points:line.points.slice().sort((left,right) => left.distanceMeters - right.distanceMeters)
+        });
       });
     });
     const counts = projected.flatMap(item => item.points.map(point => point.count));
@@ -1406,12 +1435,13 @@ async function afterWaterMap(waterbody){
           radius:6, color:"#07171E", weight:1.5, fillColor:color, fillOpacity:0.96
         }).bindTooltip(
           `<b>${esc(item.place.name)}</b><br>${esc(item.line.name || "Луч")}<br>` +
-          `счёт ${fmt(point.count)}, ${fmt(point.distanceMeters)} м`
+          `счёт ${fmt(point.count)}, ${fmt(point.distanceMeters)} м<br>` +
+          `<span style="opacity:.75">${esc(spoolLabel(item.spool))}</span>`
         ).addTo(map);
       });
     });
     const notes = [`Показано мест: ${(waterbody.places||[]).length - missingCoords}`, `замеров: ${counts.length}`];
-    if (!canProject) notes.push("катушка не настроена, лучи скрыты");
+    if (missingSpool) notes.push(`лучей без снасти: ${missingSpool}`);
     if (missingCoords) notes.push(`без координат: ${missingCoords}`);
     if (missingAzimuth) notes.push(`лучей без азимута: ${missingAzimuth}`);
     status.textContent = notes.join(" · ");
@@ -1457,6 +1487,14 @@ function readCompass(cb){
 }
 function lineSheet(p, line){
   const m = $("#modal");
+  const keptLabel = line && line.spool ? spoolLabel(line.spool) : null;
+  const selected = keptLabel ? "keep" : (DB.activePreset || "");
+  const spoolOptions = [
+    ["", "Общая из калькулятора"],
+    ...(keptLabel ? [["keep", "Как записано: " + keptLabel]] : []),
+    ...DB.presets.map(preset => [preset.id, preset.name])
+  ].map(([value, label]) =>
+    `<option value="${esc(value)}" ${value === selected ? "selected" : ""}>${esc(label)}</option>`).join("");
   m.innerHTML = `<div class="sheet">
     <div class="grab"></div>
     <h2>${line ? "Изменить луч" : "Новый луч"}</h2>
@@ -1468,6 +1506,8 @@ function lineSheet(p, line){
       </div></label>
     <div class="tiny muted" style="margin:-4px 0 12px">Встаньте лицом по направлению заброса, держите телефон ровно и нажмите «Компас» — цифра будет обновляться живьём.</div>
     <label class="f"><span>Дальность заброса, оборотов</span><input type="number" inputmode="decimal" step="1" id="lCast" value="${line&&line.cast?line.cast:""}" placeholder="80"></label>
+    <label class="f"><span>Снасть</span><select id="lSpool">${spoolOptions}</select></label>
+    <div class="tiny muted" style="margin:-4px 0 12px">Обороты этого луча переводятся в метры выбранной снастью. Пресеты берутся из калькулятора катушки; «общая» - те значения, что сейчас открыты в калькуляторе.</div>
     <div class="row" style="margin-top:6px">
       <button class="btn ghost" id="lCancel">Отмена</button>
       <button class="btn primary" id="lOk">${line ? "Сохранить" : "Создать луч"}</button>
@@ -1483,10 +1523,16 @@ function lineSheet(p, line){
     const azRaw = $("#lAz").value;
     const az = azRaw === "" ? null : ((Math.round(num(azRaw)) % 360) + 360) % 360;
     const cast = num($("#lCast").value) || null;
-    if (line){ line.name = name; line.az = az; line.cast = cast; toast("Луч сохранён"); }
+    const choice = $("#lSpool").value;
+    let spool = choice === "keep" && line ? line.spool : null;
+    if (choice !== "" && choice !== "keep"){
+      const preset = DB.presets.find(item => item.id === choice);
+      if (preset) spool = { name:preset.name, ...preset.data };
+    }
+    if (line){ line.name = name; line.az = az; line.cast = cast; line.spool = spool; toast("Луч сохранён"); }
     else {
       p.lines = p.lines || [];
-      p.lines.push({ id: uid(), name, az, cast, measures: [] });
+      p.lines.push({ id: uid(), name, az, cast, spool, measures: [] });
       toast("Луч создан");
     }
     save(); closeModal(); render();
