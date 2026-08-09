@@ -265,6 +265,11 @@ input[type=file]{display:none}
   padding:11px 18px;border-radius:24px;font-size:14px;z-index:80;opacity:0;pointer-events:none;transition:.2s;
 }
 #toast.on{opacity:1;transform:translateX(-50%)}
+#updateBtn{
+  position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);
+  z-index:35;box-shadow:0 8px 22px rgba(2,10,14,.5);white-space:nowrap;
+}
+#updateBtn[hidden]{display:none}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -296,6 +301,7 @@ input[type=file]{display:none}
 </aside>
 
 <div id="modal"></div>
+<button class="btn primary" id="updateBtn" hidden>Обновить приложение</button>
 <div id="toast"></div>
 <script src="vendor/leaflet/leaflet.js"></script>
 <script src="app-core.js"></script>
@@ -1945,10 +1951,37 @@ $("#installBtn").onclick = async () => {
 };
 syncInstall();
 window.addEventListener("keydown", event => { if (event.key === "Escape"){ closeModal(); closeDrawer(); } });
+let swReloading = false;
+function offerUpdate(worker){
+  if (!worker || !navigator.serviceWorker.controller) return;
+  const button = $("#updateBtn");
+  button.hidden = false;
+  button.onclick = () => {
+    button.disabled = true;
+    button.textContent = "Обновляю…";
+    worker.postMessage({ type:"skip-waiting" });
+  };
+}
+function watchServiceWorker(registration){
+  offerUpdate(registration.waiting);
+  registration.addEventListener("updatefound", () => {
+    const worker = registration.installing;
+    if (!worker) return;
+    worker.addEventListener("statechange", () => { if (worker.state === "installed") offerUpdate(worker); });
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") registration.update().catch(() => {});
+  });
+}
 Promise.all([load(), loadLakeCatalog()]).then(() => {
   render();
   if ("serviceWorker" in navigator){
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (swReloading) return;
+      swReloading = true;
+      location.reload();
+    });
+    navigator.serviceWorker.register("sw.js").then(watchServiceWorker).catch(() => {});
   }
 });
 </script>

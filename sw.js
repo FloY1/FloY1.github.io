@@ -1,6 +1,6 @@
 "use strict";
 
-const SW_VERSION = "2026-08-09T07:33:24.000Z";
+const SW_VERSION = "2026-08-09T09:53:51.874Z";
 const CACHE_PREFIX = "echo-map-";
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const PRECACHE_RELEASE = SW_VERSION.replace(/[:.]/g, "-");
@@ -55,6 +55,10 @@ self.addEventListener("install", event => {
     await cache.put("./lakes/index.json", registryResponse);
     await requirePublishedVersion();
   })());
+});
+
+self.addEventListener("message", event => {
+  if (event.data && event.data.type === "skip-waiting") self.skipWaiting();
 });
 
 self.addEventListener("activate", event => {

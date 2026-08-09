@@ -50,12 +50,14 @@ function createRuntime(publishedVersion){
     }
     return new Response("asset");
   };
+  let skipped = 0;
   const self = {
     location:{ origin:"http://site.test" },
-    addEventListener(type, listener){ listeners.set(type, listener); }
+    addEventListener(type, listener){ listeners.set(type, listener); },
+    skipWaiting(){ skipped++; }
   };
   vm.runInNewContext(source, { self, caches, fetch, URL, Response, Promise, console });
-  return { listeners, stores, caches, requests };
+  return { listeners, stores, caches, requests, skips:() => skipped };
 }
 
 function runWaitUntil(listener){
@@ -107,4 +109,16 @@ test("service worker связывает cache только со своим immut
 
   await runWaitUntil(runtime.listeners.get("activate"));
   assert.deepEqual(await runtime.caches.keys(), [CACHE_NAME]);
+});
+
+test("service worker выходит из ожидания только по явному сообщению", () => {
+  const runtime = createRuntime(SW_VERSION);
+  const listener = runtime.listeners.get("message");
+
+  listener({ data:null });
+  listener({ data:{ type:"ping" } });
+  assert.equal(runtime.skips(), 0);
+
+  listener({ data:{ type:"skip-waiting" } });
+  assert.equal(runtime.skips(), 1);
 });
