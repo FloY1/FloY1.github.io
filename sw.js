@@ -1,6 +1,6 @@
 "use strict";
 
-const SW_VERSION = "2026-08-07T09:39:35.438Z";
+const SW_VERSION = "2026-08-09T07:33:24.000Z";
 const CACHE_PREFIX = "echo-map-";
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const PRECACHE_RELEASE = SW_VERSION.replace(/[:.]/g, "-");
