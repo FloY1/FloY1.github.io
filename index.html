@@ -1463,7 +1463,7 @@ async function afterWaterMap(waterbody){
     const nativeMin = manifest.minZoom;
     const nativeZoom = manifest.maxZoom;
     const map = L.map("watermap", {
-      minZoom:nativeMin,
+      minZoom:Math.max(0, nativeMin - 4),
       maxZoom:nativeZoom + 3,
       maxBounds:bounds.pad(0.75),
       maxBoundsViscosity:0.7
@@ -1530,7 +1530,12 @@ async function afterWaterMap(waterbody){
     if (missingSpool) notes.push(`лучей без снасти: ${missingSpool}`);
     if (missingCoords) notes.push(`без координат: ${missingCoords}`);
     if (missingAzimuth) notes.push(`лучей без азимута: ${missingAzimuth}`);
-    status.textContent = notes.join(" · ");
+    const paintStatus = () => {
+      const hidden = map.getZoom() < nativeMin;
+      status.textContent = notes.concat(hidden ? ["батиметрия появится при увеличении"] : []).join(" · ");
+    };
+    map.on("zoomend", paintStatus);
+    paintStatus();
     setTimeout(() => map.invalidateSize(), 0);
   } catch(error){
     status.textContent = "Не удалось открыть локальный пакет: " + error.message;
