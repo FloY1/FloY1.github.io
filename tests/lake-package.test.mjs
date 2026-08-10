@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import {
   bboxFromGeometry,
   tilesForBbox,
+  zoomRange,
   clipGeometryToBbox,
   polygonFromOverpass,
   fetchOsmBoundary,
@@ -35,6 +36,14 @@ test("tilesForBbox возвращает покрытие XYZ без пропус
     { z:1, x:1, y:0 },
     { z:1, x:1, y:1 }
   ]);
+});
+
+test("zoomRange принимает один уровень и диапазон пирамиды", () => {
+  assert.deepEqual(zoomRange(18), [18, 18]);
+  assert.deepEqual(zoomRange("14-18"), [14, 18]);
+  assert.throws(() => zoomRange("18-14"), /low to high/);
+  assert.throws(() => zoomRange("18-23"), /from 0 to 22/);
+  assert.throws(() => zoomRange("z18"), /N or N-M/);
 });
 
 test("clipGeometryToBbox обрезает открытую геометрию реки до района работ", () => {
@@ -287,4 +296,38 @@ test("restampShell выпускает новую версию оболочки, 
     () => restampShell({ outputRoot, generatedAt:"2026-08-07T11:00:00.000Z", serviceWorkerPath }),
     /no published waterbodies/
   );
+});
+
+test("buildLakePackage скачивает все уровни пирамиды зумов", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-pyramid-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { "content-type":"image/png" });
+    response.end(PNG_1X1);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const serviceWorkerPath = path.join(root, "sw.js");
+  await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
+
+  const result = await buildLakePackage({
+    slug:"demo-lake",
+    name:"Демо-озеро",
+    type:"lake",
+    boundary,
+    zoom:"0-2",
+    config:"dev-config",
+    token:"dev-token",
+    outputRoot:path.join(root, "lakes"),
+    endpoint:`http://127.0.0.1:${server.address().port}/tile/{z}/{x}/{y}`,
+    generatedAt:"2026-08-06T00:00:00.000Z",
+    serviceWorkerPath
+  });
+
+  assert.equal(result.manifest.minZoom, 0);
+  assert.equal(result.manifest.maxZoom, 2);
+  assert.equal(result.tileCount, 1 + 4 + 4);
+  const packageDir = path.join(root, "lakes/demo-lake/2026-08-06T00-00-00-000Z");
+  assert.deepEqual(await readFile(path.join(packageDir, "tiles/0/0/0.png")), PNG_1X1);
+  assert.deepEqual(await readFile(path.join(packageDir, "tiles/2/1/1.png")), PNG_1X1);
 });

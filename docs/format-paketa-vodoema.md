@@ -69,7 +69,7 @@
 ```
 
 - `boundary`: GeoJSON `Polygon`/`MultiPolygon` в WGS84 (`[lon, lat]`) - береговая линия из OSM.
-- `minZoom`/`maxZoom` - один рабочий зум (в v1 равны).
+- `minZoom`/`maxZoom` - границы пирамиды тайлов. Приложение не даёт уменьшить масштаб ниже `minZoom`: за пределами пирамиды Leaflet начал бы уменьшать тайлы `maxZoom` и держать в памяти весь пакет сразу ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md)).
 - `du`: единицы глубины Navionics (`1` = метры).
 
 ## Тайлы
@@ -116,7 +116,7 @@ node tools/lake-package.mjs \
   --name Нарочь \
   --type lake \
   --osm-id R123456 \
-  --zoom 18 \
+  --zoom 14-18 \
   --generated-at 2026-08-06T12:00:00.000Z \
   --output lakes
 ```
@@ -149,11 +149,11 @@ node tools/lake-package.mjs \
   --type river \
   --boundary /tmp/pripyat.overpass.json \
   --clip 26.111993,52.074425,26.155853,52.101375 \
-  --zoom 18 \
+  --zoom 14-18 \
   --output lakes
 ```
 
-Прямоугольник задавайте в порядке `bbox`: `minLon,minLat,maxLon,maxLat`. Радиус около 1.5 км от точки лова - примерно 900 тайлов на `z18`; всё русло из OSM без обрезки дало бы порядка 9500.
+Прямоугольник задавайте в порядке `bbox`: `minLon,minLat,maxLon,maxLat`. Радиус около 1 км от точки лова - 396 тайлов на `z18` и 569 на всю пирамиду `z14-z18`; всё русло из OSM без обрезки дало бы порядка 9500 только на `z18`. `--zoom` без диапазона собирает один уровень: масштаб на карте будет зафиксирован ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md)).
 
 ### Обновление оболочки без пересборки пакетов
 

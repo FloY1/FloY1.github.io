@@ -60,6 +60,17 @@ export function tilesForBbox(bbox, zoom){
   return tiles;
 }
 
+export function zoomRange(value){
+  const text = String(value == null ? "" : value).trim();
+  const match = /^(\d+)(?:-(\d+))?$/.exec(text);
+  if (!match) throw new Error("Zoom must be N or N-M");
+  const min = Number(match[1]);
+  const max = match[2] === undefined ? min : Number(match[2]);
+  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max > 22) throw new Error("Zoom must be an integer from 0 to 22");
+  if (min > max) throw new Error("Zoom range must go from low to high");
+  return [min, max];
+}
+
 function clipRing(ring, rect){
   const [minLon, minLat, maxLon, maxLat] = rect;
   const edges = [
@@ -409,7 +420,9 @@ export async function buildLakePackage(options){
   const release = releaseFromTimestamp(generatedAt);
   const geometry = clip ? clipGeometryToBbox(boundary, clip) : boundary;
   const bbox = bboxFromGeometry(geometry);
-  const tiles = tilesForBbox(bbox, zoom);
+  const [minZoom, maxZoom] = zoomRange(zoom);
+  const tiles = [];
+  for (let level = minZoom; level <= maxZoom; level++) tiles.push(...tilesForBbox(bbox, level));
   const manifest = {
     slug,
     release,
@@ -417,8 +430,8 @@ export async function buildLakePackage(options){
     type,
     crs:"EPSG:3857",
     tileSize:256,
-    minZoom:zoom,
-    maxZoom:zoom,
+    minZoom,
+    maxZoom,
     du:1,
     bbox,
     center:[(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2],
@@ -516,7 +529,7 @@ async function main(){
     type:args.type,
     boundary:geometry,
     clip:args.clip ? args.clip.split(",").map(Number) : undefined,
-    zoom:Number(args.zoom),
+    zoom:args.zoom,
     config:args.config || process.env.NAVIONICS_CONFIG,
     token:args.token || process.env.NAVIONICS_TOKEN,
     outputRoot,

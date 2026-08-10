@@ -1460,18 +1460,19 @@ async function afterWaterMap(waterbody){
     if (route.view !== "watermap" || route.wid !== waterbody.id || !$("#watermap")) return;
     const [minLon, minLat, maxLon, maxLat] = manifest.bbox;
     const bounds = L.latLngBounds([minLat,minLon], [maxLat,maxLon]);
+    const nativeMin = manifest.minZoom;
     const nativeZoom = manifest.maxZoom;
     const map = L.map("watermap", {
-      minZoom:Math.max(0, nativeZoom - 4),
+      minZoom:nativeMin,
       maxZoom:nativeZoom + 3,
       maxBounds:bounds.pad(0.75),
       maxBoundsViscosity:0.7
     });
     viewCleanup = () => map.remove();
     L.tileLayer(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/tiles/{z}/{x}/{y}.png`, {
-      minNativeZoom:nativeZoom,
+      minNativeZoom:nativeMin,
       maxNativeZoom:nativeZoom,
-      minZoom:Math.max(0, nativeZoom - 4),
+      minZoom:nativeMin,
       maxZoom:nativeZoom + 3,
       tileSize:manifest.tileSize,
       bounds,
