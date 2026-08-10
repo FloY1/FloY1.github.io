@@ -78,7 +78,8 @@ test("validImport проверяет каждую присутствующую �
   }), false);
   const baseWaterbody = { id:"w1", name:"Озеро", type:"lake", packageSlug:null, places:[] };
   assert.equal(Core.validImport({ waterbodies:[{ ...baseWaterbody, id:'x" onfocus="alert(1)' }] }), false);
-  assert.equal(Core.validImport({ waterbodies:[{ ...baseWaterbody, type:"river", packageSlug:"demo-lake" }] }), false);
+  assert.equal(Core.validImport({ waterbodies:[{ ...baseWaterbody, type:"river", packageSlug:"pripyat-pinsk" }] }), true);
+  assert.equal(Core.validImport({ waterbodies:[{ ...baseWaterbody, type:"unassigned", packageSlug:"demo-lake" }] }), false);
   assert.equal(Core.validImport({ waterbodies:[{
     ...baseWaterbody,
     places:[{ id:"p1", name:"Берег", photo:'x" onerror="alert(1)', lines:[] }]

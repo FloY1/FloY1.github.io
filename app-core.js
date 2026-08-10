@@ -35,7 +35,7 @@
     if (!waterbody.id) waterbody.id = makeId();
     if (!WATERBODY_TYPES.has(waterbody.type)) waterbody.type = "lake";
     if (typeof waterbody.packageSlug !== "string" || !PACKAGE_SLUG_PATTERN.test(waterbody.packageSlug)) waterbody.packageSlug = null;
-    if (waterbody.type === "river" || waterbody.type === "unassigned") waterbody.packageSlug = null;
+    if (waterbody.type === "unassigned") waterbody.packageSlug = null;
     if (!Array.isArray(waterbody.places)) waterbody.places = [];
     waterbody.places.forEach(place => normalizePlace(place, makeId));
     return waterbody;
@@ -177,7 +177,7 @@
     const waterbody = item => item && typeof item === "object" && id(item.id) &&
       typeof item.name === "string" && WATERBODY_TYPES.has(item.type) &&
       (item.packageSlug == null || typeof item.packageSlug === "string" && PACKAGE_SLUG_PATTERN.test(item.packageSlug)) &&
-      (!["river", "unassigned"].includes(item.type) || item.packageSlug == null) &&
+      (item.type !== "unassigned" || item.packageSlug == null) &&
       Array.isArray(item.places) && item.places.every(place);
     const preset = item => item && typeof item === "object" && id(item.id) &&
       typeof item.name === "string" && reel(item.data);
@@ -252,7 +252,7 @@
     if (!manifest || typeof manifest !== "object") return false;
     if (typeof manifest.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(manifest.slug)) return false;
     if (typeof manifest.release !== "string" || !/^[A-Za-z0-9-]+$/.test(manifest.release)) return false;
-    if (typeof manifest.name !== "string" || !["lake", "reservoir"].includes(manifest.type)) return false;
+    if (typeof manifest.name !== "string" || !["lake", "reservoir", "river"].includes(manifest.type)) return false;
     if (manifest.crs !== "EPSG:3857" || manifest.tileSize !== 256) return false;
     if (!Number.isInteger(manifest.minZoom) || !Number.isInteger(manifest.maxZoom) || manifest.minZoom > manifest.maxZoom) return false;
     if (!Array.isArray(manifest.bbox) || manifest.bbox.length !== 4 || !manifest.bbox.every(finite)) return false;

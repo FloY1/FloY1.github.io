@@ -60,6 +60,101 @@ export function tilesForBbox(bbox, zoom){
   return tiles;
 }
 
+function clipRing(ring, rect){
+  const [minLon, minLat, maxLon, maxLat] = rect;
+  const edges = [
+    { inside:point => point[0] >= minLon, cut:(from, to) => [minLon, from[1] + (to[1] - from[1]) * (minLon - from[0]) / (to[0] - from[0])] },
+    { inside:point => point[0] <= maxLon, cut:(from, to) => [maxLon, from[1] + (to[1] - from[1]) * (maxLon - from[0]) / (to[0] - from[0])] },
+    { inside:point => point[1] >= minLat, cut:(from, to) => [from[0] + (to[0] - from[0]) * (minLat - from[1]) / (to[1] - from[1]), minLat] },
+    { inside:point => point[1] <= maxLat, cut:(from, to) => [from[0] + (to[0] - from[0]) * (maxLat - from[1]) / (to[1] - from[1]), maxLat] }
+  ];
+  let output = ring.slice(0, -1);
+  for (const edge of edges){
+    const input = output;
+    output = [];
+    for (let index = 0; index < input.length; index++){
+      const current = input[index];
+      const previous = input[(index + input.length - 1) % input.length];
+      const currentInside = edge.inside(current);
+      if (currentInside && !edge.inside(previous)) output.push(edge.cut(previous, current));
+      if (currentInside) output.push(current);
+      if (!currentInside && edge.inside(previous)) output.push(edge.cut(previous, current));
+    }
+    if (output.length < 3) return null;
+  }
+  return output.concat([output[0]]);
+}
+
+export function clipGeometryToBbox(geometry, rect){
+  if (!Array.isArray(rect) || rect.length !== 4 || !rect.every(value => Number.isFinite(value))) throw new Error("Clip must be minLon,minLat,maxLon,maxLat");
+  if (rect[0] >= rect[2] || rect[1] >= rect[3]) throw new Error("Clip rectangle is empty");
+  bboxFromGeometry(geometry);
+  const polygons = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
+  const clipped = [];
+  for (const rings of polygons){
+    const outer = clipRing(rings[0], rect);
+    if (!outer) continue;
+    clipped.push([outer, ...rings.slice(1).map(ring => clipRing(ring, rect)).filter(Boolean)]);
+  }
+  if (!clipped.length) throw new Error("Clip rectangle does not intersect the boundary");
+  return clipped.length === 1
+    ? { type:"Polygon", coordinates:clipped[0] }
+    : { type:"MultiPolygon", coordinates:clipped };
+}
+
+function assembleRings(segments){
+  const same = (left, right) => left[0] === right[0] && left[1] === right[1];
+  const pending = segments.map(segment => segment.geometry.map(point => [point.lon, point.lat]));
+  const rings = [];
+  while (pending.length){
+    let ring = pending.shift();
+    while (!same(ring[0], ring[ring.length - 1])){
+      const tail = ring[ring.length - 1];
+      const index = pending.findIndex(segment => same(segment[0], tail) || same(segment[segment.length - 1], tail));
+      if (index < 0) throw new Error("Overpass ways do not form a closed ring");
+      const segment = pending.splice(index, 1)[0];
+      ring = ring.concat((same(segment[0], tail) ? segment : segment.slice().reverse()).slice(1));
+    }
+    rings.push(ring);
+  }
+  return rings;
+}
+
+function ringContains(ring, point){
+  let inside = false;
+  for (let index = 0, previous = ring.length - 1; index < ring.length; previous = index++){
+    const [x1, y1] = ring[index];
+    const [x2, y2] = ring[previous];
+    if ((y1 > point[1]) !== (y2 > point[1]) && point[0] < (x2 - x1) * (point[1] - y1) / (y2 - y1) + x1) inside = !inside;
+  }
+  return inside;
+}
+
+export function polygonFromOverpass(document){
+  const elements = Array.isArray(document && document.elements) ? document.elements : null;
+  if (!elements) throw new Error("Overpass export must contain elements");
+  const outer = [];
+  const inner = [];
+  for (const element of elements){
+    if (element.type === "relation" && Array.isArray(element.members)){
+      const members = element.members.filter(member => Array.isArray(member.geometry) && member.geometry.length > 1);
+      outer.push(...assembleRings(members.filter(member => member.role !== "inner")));
+      inner.push(...assembleRings(members.filter(member => member.role === "inner")));
+    } else if (element.type === "way" && Array.isArray(element.geometry)){
+      outer.push(...assembleRings([element]));
+    }
+  }
+  if (!outer.length) throw new Error("Overpass export has no closed water ring");
+  const polygons = outer.map(ring => [ring]);
+  for (const hole of inner){
+    const host = polygons.find(polygon => ringContains(polygon[0], hole[0]));
+    if (host) host.push(hole);
+  }
+  return polygons.length === 1
+    ? { type:"Polygon", coordinates:polygons[0] }
+    : { type:"MultiPolygon", coordinates:polygons };
+}
+
 export async function fetchOsmBoundary(osmId, options = {}){
   if (!/^[RWN]\d+$/.test(osmId || "")) throw new Error("OSM id must look like R123, W123 or N123");
   const endpoint = options.endpoint || "https://nominatim.openstreetmap.org/lookup";
@@ -292,6 +387,7 @@ export async function buildLakePackage(options){
     name,
     type,
     boundary,
+    clip,
     zoom,
     config,
     token,
@@ -304,14 +400,15 @@ export async function buildLakePackage(options){
   } = options;
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug || "")) throw new Error("Slug must be kebab-case ASCII");
   if (typeof name !== "string" || !name.trim()) throw new Error("Name is required");
-  if (!["lake", "reservoir"].includes(type)) throw new Error("Type must be lake or reservoir");
+  if (!["lake", "reservoir", "river"].includes(type)) throw new Error("Type must be lake, reservoir or river");
   if (typeof config !== "string" || !config || typeof token !== "string" || !token) throw new Error("Navionics config and token are required");
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error("Concurrency must be an integer from 1 to 32");
   if (typeof generatedAtInput !== "string" || Number.isNaN(Date.parse(generatedAtInput))) throw new Error("Generated timestamp must be ISO-8601");
 
   const generatedAt = new Date(generatedAtInput).toISOString();
   const release = releaseFromTimestamp(generatedAt);
-  const bbox = bboxFromGeometry(boundary);
+  const geometry = clip ? clipGeometryToBbox(boundary, clip) : boundary;
+  const bbox = bboxFromGeometry(geometry);
   const tiles = tilesForBbox(bbox, zoom);
   const manifest = {
     slug,
@@ -325,7 +422,7 @@ export async function buildLakePackage(options){
     du:1,
     bbox,
     center:[(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2],
-    boundary,
+    boundary:geometry,
     source:"Navionics SonarChart (layer=1, du=1)",
     attribution:"© Navionics/Garmin, © OpenStreetMap",
     generatedAt
@@ -402,8 +499,10 @@ async function main(){
   if (command !== "build") throw new Error(`Unknown command ${command}`);
   let geometry;
   if (args.boundary){
-    const boundary = JSON.parse(await readFile(args.boundary, "utf8"));
-    geometry = boundary.type === "Feature" ? boundary.geometry : boundary;
+    const source = JSON.parse(await readFile(args.boundary, "utf8"));
+    geometry = Array.isArray(source.elements)
+      ? polygonFromOverpass(source)
+      : source.type === "Feature" ? source.geometry : source;
   } else if (args["osm-id"]){
     geometry = await fetchOsmBoundary(args["osm-id"], {
       endpoint:args.nominatim || undefined
@@ -416,6 +515,7 @@ async function main(){
     name:args.name,
     type:args.type,
     boundary:geometry,
+    clip:args.clip ? args.clip.split(",").map(Number) : undefined,
     zoom:Number(args.zoom),
     config:args.config || process.env.NAVIONICS_CONFIG,
     token:args.token || process.env.NAVIONICS_TOKEN,

@@ -1768,7 +1768,7 @@ function waterbodySheet(waterbody){
   const typeSelect = $("#wType");
   const packageSelect = $("#wPackage");
   const syncPackage = () => {
-    const packageSupported = typeSelect.value === "lake" || typeSelect.value === "reservoir";
+    const packageSupported = typeSelect.value !== "unassigned";
     packageSelect.disabled = !packageSupported;
     if (!packageSupported) packageSelect.value = "";
   };
@@ -1781,7 +1781,7 @@ function waterbodySheet(waterbody){
     const data = {
       name,
       type,
-      packageSlug:type === "lake" || type === "reservoir" ? packageSelect.value || null : null
+      packageSlug:type === "unassigned" ? null : packageSelect.value || null
     };
     let target = waterbody;
     if (target) Object.assign(target, data);

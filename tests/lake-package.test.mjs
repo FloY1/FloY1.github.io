@@ -7,6 +7,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import {
   bboxFromGeometry,
   tilesForBbox,
+  clipGeometryToBbox,
+  polygonFromOverpass,
   fetchOsmBoundary,
   buildLakePackage,
   restampShell
@@ -33,6 +35,60 @@ test("tilesForBbox возвращает покрытие XYZ без пропус
     { z:1, x:1, y:0 },
     { z:1, x:1, y:1 }
   ]);
+});
+
+test("clipGeometryToBbox обрезает открытую геометрию реки до района работ", () => {
+  const river = {
+    type:"Polygon",
+    coordinates:[[[0,0],[10,0],[10,1],[0,1],[0,0]]]
+  };
+
+  const clipped = clipGeometryToBbox(river, [2,-1,4,2]);
+
+  assert.equal(clipped.type, "Polygon");
+  assert.deepEqual(bboxFromGeometry(clipped), [2,0,4,1]);
+  assert.throws(() => clipGeometryToBbox(river, [20,0,21,1]), /does not intersect/);
+  assert.throws(() => clipGeometryToBbox(river, [4,0,2,1]), /empty/);
+});
+
+test("clipGeometryToBbox сохраняет острова внутри района", () => {
+  const withIsland = {
+    type:"Polygon",
+    coordinates:[
+      [[0,0],[10,0],[10,10],[0,10],[0,0]],
+      [[1,1],[2,1],[2,2],[1,2],[1,1]],
+      [[8,8],[9,8],[9,9],[8,9],[8,8]]
+    ]
+  };
+
+  const clipped = clipGeometryToBbox(withIsland, [0,0,5,5]);
+
+  assert.equal(clipped.coordinates.length, 2);
+  assert.deepEqual(bboxFromGeometry({ type:"Polygon", coordinates:[clipped.coordinates[1]] }), [1,1,2,2]);
+});
+
+test("polygonFromOverpass собирает кольца отношения с островами", () => {
+  const document = {
+    elements:[{
+      type:"relation",
+      members:[
+        { role:"outer", geometry:[{ lon:0, lat:0 }, { lon:4, lat:0 }, { lon:4, lat:4 }] },
+        { role:"outer", geometry:[{ lon:4, lat:4 }, { lon:0, lat:4 }, { lon:0, lat:0 }] },
+        { role:"inner", geometry:[{ lon:1, lat:1 }, { lon:2, lat:1 }, { lon:2, lat:2 }, { lon:1, lat:2 }, { lon:1, lat:1 }] }
+      ]
+    }]
+  };
+
+  const geometry = polygonFromOverpass(document);
+
+  assert.equal(geometry.type, "Polygon");
+  assert.equal(geometry.coordinates.length, 2);
+  assert.deepEqual(geometry.coordinates[0][0], geometry.coordinates[0].at(-1));
+  assert.deepEqual(bboxFromGeometry(geometry), [0,0,4,4]);
+  assert.throws(() => polygonFromOverpass({ elements:[{
+    type:"relation",
+    members:[{ role:"outer", geometry:[{ lon:0, lat:0 }, { lon:1, lat:1 }] }]
+  }] }), /closed ring/);
 });
 
 test("fetchOsmBoundary получает Polygon по OSM relation id", async t => {
