@@ -12,7 +12,10 @@ import {
   polygonFromOverpass,
   fetchOsmBoundary,
   buildLakePackage,
-  restampShell
+  extendLakePyramid,
+  restampShell,
+  encodeRgbaPng,
+  decodeRgbaPng
 } from "../tools/lake-package.mjs";
 
 const PNG_1X1 = Buffer.from(
@@ -330,4 +333,86 @@ test("buildLakePackage скачивает все уровни пирамиды �
   const packageDir = path.join(root, "lakes/demo-lake/2026-08-06T00-00-00-000Z");
   assert.deepEqual(await readFile(path.join(packageDir, "tiles/0/0/0.png")), PNG_1X1);
   assert.deepEqual(await readFile(path.join(packageDir, "tiles/2/1/1.png")), PNG_1X1);
+});
+
+test("extendLakePyramid достраивает нижние уровни даунсемплом верхнего", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-downscale-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const solidRed = Buffer.alloc(256 * 256 * 4);
+  for (let index = 0; index < solidRed.length; index += 4){
+    solidRed[index] = 255;
+    solidRed[index + 3] = 255;
+  }
+  const redTile = encodeRgbaPng(256, 256, solidRed);
+  const server = http.createServer((request, response) => {
+    response.writeHead(200, { "content-type":"image/png" });
+    response.end(redTile);
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const serviceWorkerPath = path.join(root, "sw.js");
+  await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
+
+  await buildLakePackage({
+    slug:"demo-lake",
+    name:"Демо-озеро",
+    type:"lake",
+    boundary,
+    zoom:2,
+    config:"dev-config",
+    token:"dev-token",
+    outputRoot:path.join(root, "lakes"),
+    endpoint:`http://127.0.0.1:${server.address().port}/tile/{z}/{x}/{y}`,
+    generatedAt:"2026-08-06T00:00:00.000Z",
+    serviceWorkerPath
+  });
+
+  const result = await extendLakePyramid({
+    slugs:["demo-lake"],
+    minZoom:0,
+    outputRoot:path.join(root, "lakes"),
+    generatedAt:"2026-08-06T01:00:00.000Z",
+    serviceWorkerPath
+  });
+  const release = "2026-08-06T01-00-00-000Z";
+  assert.equal(result.release, release);
+  assert.deepEqual(result.packages, [{ slug:"demo-lake", release, synthesized:5 }]);
+
+  const packageDir = path.join(root, "lakes/demo-lake", release);
+  const manifest = JSON.parse(await readFile(path.join(packageDir, "lake.json"), "utf8"));
+  assert.equal(manifest.minZoom, 0);
+  assert.equal(manifest.maxZoom, 2);
+  assert.equal(manifest.release, release);
+  assert.equal(manifest.generatedAt, "2026-08-06T01:00:00.000Z");
+  assert.deepEqual(await readFile(path.join(packageDir, "tiles/2/1/1.png")), redTile);
+
+  const pixelAt = (tile, x, y) => Array.from(tile.pixels.subarray((y * 256 + x) * 4, (y * 256 + x) * 4 + 4));
+  const zoomOne = decodeRgbaPng(await readFile(path.join(packageDir, "tiles/1/0/0.png")));
+  assert.deepEqual(pixelAt(zoomOne, 192, 192), [255, 0, 0, 255], "нижний правый квадрант закрашен из z2 1/1");
+  assert.deepEqual(pixelAt(zoomOne, 64, 64), [0, 0, 0, 0], "квадрант без исходного тайла прозрачен");
+  const zoomZero = decodeRgbaPng(await readFile(path.join(packageDir, "tiles/0/0/0.png")));
+  assert.deepEqual(pixelAt(zoomZero, 96, 96), [255, 0, 0, 255], "z0 собирает центр покрытия из z1");
+  assert.deepEqual(pixelAt(zoomZero, 16, 16), [0, 0, 0, 0], "края bbox на z0 прозрачны");
+
+  const registry = JSON.parse(await readFile(path.join(root, "lakes/index.json"), "utf8"));
+  assert.deepEqual(
+    registry.waterbodies.map(item => ({ slug:item.slug, release:item.release })),
+    [{ slug:"demo-lake", release }]
+  );
+  const precache = JSON.parse(await readFile(path.join(root, "lakes/precache", `${release}.json`), "utf8"));
+  assert.ok(precache.files.includes(`lakes/demo-lake/${release}/tiles/0/0/0.png`));
+  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-06T01:00:00.000Z";/);
+  await assert.rejects(
+    readFile(path.join(root, "lakes/demo-lake/2026-08-06T00-00-00-000Z/tiles/1/0/0.png")),
+    error => error.code === "ENOENT"
+  );
+
+  await assert.rejects(
+    () => extendLakePyramid({ slugs:["demo-lake"], minZoom:2, outputRoot:path.join(root, "lakes"), serviceWorkerPath }),
+    /already starts at z0/
+  );
+  await assert.rejects(
+    () => extendLakePyramid({ slugs:["missing"], minZoom:0, outputRoot:path.join(root, "lakes"), serviceWorkerPath }),
+    /is not published/
+  );
 });

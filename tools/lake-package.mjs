@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import path from "node:path";
+import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 
@@ -191,6 +192,113 @@ function isPng(buffer){
 }
 function releaseFromTimestamp(generatedAt){
   return new Date(generatedAt).toISOString().replace(/[:.]/g, "-");
+}
+
+export function decodeRgbaPng(buffer){
+  if (!isPng(buffer)) throw new Error("Tile is not a PNG");
+  let offset = 8;
+  let width = 0, height = 0, header = null;
+  const idat = [];
+  while (offset + 8 <= buffer.length){
+    const length = buffer.readUInt32BE(offset);
+    const type = buffer.toString("latin1", offset + 4, offset + 8);
+    const data = buffer.subarray(offset + 8, offset + 8 + length);
+    if (type === "IHDR"){
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      header = { bitDepth:data[8], colorType:data[9], interlace:data[12] };
+    } else if (type === "IDAT") idat.push(data);
+    else if (type === "IEND") break;
+    offset += 12 + length;
+  }
+  if (!header || header.bitDepth !== 8 || header.colorType !== 6 || header.interlace !== 0){
+    throw new Error("Only 8-bit non-interlaced RGBA PNG tiles are supported");
+  }
+  const stride = width * 4;
+  const raw = zlib.inflateSync(Buffer.concat(idat));
+  if (raw.length !== (stride + 1) * height) throw new Error("PNG payload size mismatch");
+  const pixels = Buffer.allocUnsafe(stride * height);
+  for (let y = 0; y < height; y++){
+    const filter = raw[y * (stride + 1)];
+    const row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    const out = pixels.subarray(y * stride, (y + 1) * stride);
+    const prev = y ? pixels.subarray((y - 1) * stride, y * stride) : null;
+    for (let x = 0; x < stride; x++){
+      const left = x >= 4 ? out[x - 4] : 0;
+      const up = prev ? prev[x] : 0;
+      const upLeft = prev && x >= 4 ? prev[x - 4] : 0;
+      let value = row[x];
+      if (filter === 1) value += left;
+      else if (filter === 2) value += up;
+      else if (filter === 3) value += (left + up) >> 1;
+      else if (filter === 4){
+        const initial = left + up - upLeft;
+        const viaLeft = Math.abs(initial - left);
+        const viaUp = Math.abs(initial - up);
+        const viaUpLeft = Math.abs(initial - upLeft);
+        value += viaLeft <= viaUp && viaLeft <= viaUpLeft ? left : viaUp <= viaUpLeft ? up : upLeft;
+      } else if (filter !== 0) throw new Error(`Unsupported PNG filter ${filter}`);
+      out[x] = value & 0xff;
+    }
+  }
+  return { width, height, pixels };
+}
+
+function pngChunk(type, data){
+  const chunk = Buffer.allocUnsafe(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  chunk.write(type, 4, "latin1");
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(zlib.crc32(chunk.subarray(4, 8 + data.length)), 8 + data.length);
+  return chunk;
+}
+
+export function encodeRgbaPng(width, height, pixels){
+  const stride = width * 4;
+  if (pixels.length !== stride * height) throw new Error("Pixel buffer size mismatch");
+  const raw = Buffer.allocUnsafe((stride + 1) * height);
+  for (let y = 0; y < height; y++){
+    raw[y * (stride + 1)] = 0;
+    pixels.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+  }
+  const ihdr = Buffer.allocUnsafe(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+  ihdr[10] = 0;
+  ihdr[11] = 0;
+  ihdr[12] = 0;
+  return Buffer.concat([
+    PNG_MAGIC,
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", zlib.deflateSync(raw, { level:9 })),
+    pngChunk("IEND", Buffer.alloc(0))
+  ]);
+}
+
+function downscaleIntoQuadrant(child, parent, size, offsetX, offsetY){
+  const half = size / 2;
+  for (let y = 0; y < half; y++){
+    for (let x = 0; x < half; x++){
+      let red = 0, green = 0, blue = 0, alpha = 0;
+      for (let dy = 0; dy < 2; dy++){
+        for (let dx = 0; dx < 2; dx++){
+          const index = ((y * 2 + dy) * size + x * 2 + dx) * 4;
+          const weight = child[index + 3];
+          red += child[index] * weight;
+          green += child[index + 1] * weight;
+          blue += child[index + 2] * weight;
+          alpha += weight;
+        }
+      }
+      const out = ((offsetY + y) * size + offsetX + x) * 4;
+      parent[out] = alpha ? Math.round(red / alpha) : 0;
+      parent[out + 1] = alpha ? Math.round(green / alpha) : 0;
+      parent[out + 2] = alpha ? Math.round(blue / alpha) : 0;
+      parent[out + 3] = Math.round(alpha / 4);
+    }
+  }
 }
 
 
@@ -481,6 +589,84 @@ export async function buildLakePackage(options){
   return { manifest, tileCount:tiles.length, downloaded };
 }
 
+export async function extendLakePyramid(options){
+  const {
+    slugs,
+    minZoom,
+    outputRoot,
+    generatedAt:generatedAtInput = new Date().toISOString(),
+    serviceWorkerPath
+  } = options;
+  if (!Array.isArray(slugs) || !slugs.length) throw new Error("Pass at least one package slug");
+  if (!Number.isInteger(minZoom) || minZoom < 0 || minZoom > 22) throw new Error("Min zoom must be an integer from 0 to 22");
+  if (typeof generatedAtInput !== "string" || Number.isNaN(Date.parse(generatedAtInput))) throw new Error("Generated timestamp must be ISO-8601");
+
+  const generatedAt = new Date(generatedAtInput).toISOString();
+  const release = releaseFromTimestamp(generatedAt);
+  const registry = await readRegistry(outputRoot, generatedAt);
+  const serviceWorker = await prepareServiceWorker(serviceWorkerPath, generatedAt);
+  const packages = [];
+  for (const slug of slugs){
+    const existingIndex = registry.waterbodies.findIndex(item => item.slug === slug);
+    if (existingIndex < 0) throw new Error(`Package ${slug} is not published`);
+    const existing = registry.waterbodies[existingIndex];
+    const currentDir = path.join(outputRoot, slug, existing.release);
+    const manifest = await readJson(path.join(currentDir, "lake.json"), null);
+    if (!manifest) throw new Error(`Manifest for ${slug} is missing`);
+    if (minZoom >= manifest.minZoom) throw new Error(`Package ${slug} already starts at z${manifest.minZoom}`);
+    const size = manifest.tileSize;
+    if (!Number.isInteger(size) || size < 2 || size % 2) throw new Error(`Package ${slug} has an invalid tile size`);
+
+    const packageDir = path.join(outputRoot, slug, release);
+    const stagingDir = `${packageDir}.staging`;
+    await rm(stagingDir, { recursive:true, force:true });
+    await mkdir(stagingDir, { recursive:true });
+    let synthesized = 0;
+    try {
+      for (const file of await collectFiles(currentDir)){
+        if (!file.startsWith("tiles/")) continue;
+        const destination = path.join(stagingDir, file);
+        await mkdir(path.dirname(destination), { recursive:true });
+        await writeFile(destination, await readFile(path.join(currentDir, file)));
+      }
+      for (let level = manifest.minZoom - 1; level >= minZoom; level--){
+        for (const tile of tilesForBbox(manifest.bbox, level)){
+          const parent = Buffer.alloc(size * size * 4);
+          for (const [dx, dy] of [[0,0],[1,0],[0,1],[1,1]]){
+            const childFile = path.join(stagingDir, "tiles", String(level + 1), String(tile.x * 2 + dx), `${tile.y * 2 + dy}.png`);
+            let content;
+            try {
+              content = await readFile(childFile);
+            } catch(error){
+              if (error.code !== "ENOENT") throw error;
+              continue;
+            }
+            const child = decodeRgbaPng(content);
+            if (child.width !== size || child.height !== size){
+              throw new Error(`Tile ${level + 1}/${tile.x * 2 + dx}/${tile.y * 2 + dy} of ${slug} is not ${size}x${size}`);
+            }
+            downscaleIntoQuadrant(child.pixels, parent, size, dx * size / 2, dy * size / 2);
+          }
+          const destination = path.join(stagingDir, "tiles", String(level), String(tile.x), `${tile.y}.png`);
+          await mkdir(path.dirname(destination), { recursive:true });
+          await writeFile(destination, encodeRgbaPng(size, size, parent));
+          synthesized++;
+        }
+      }
+      const updated = { ...manifest, release, minZoom, generatedAt };
+      await writeFileAtomic(path.join(stagingDir, "lake.json"), JSON.stringify(updated, null, 2) + "\n");
+      await publishRelease(stagingDir, packageDir);
+    } catch(error){
+      await rm(stagingDir, { recursive:true, force:true });
+      throw error;
+    }
+    registry.waterbodies[existingIndex] = { ...existing, release };
+    packages.push({ slug, release, synthesized });
+  }
+  await publishRegistry(outputRoot, registry, generatedAt, serviceWorker);
+  return { release, generatedAt, packages };
+}
+
 function parseArgs(argv){
   const values = {};
   for (let index = 0; index < argv.length; index += 2){
@@ -507,6 +693,17 @@ async function main(){
       serviceWorkerPath
     });
     console.log(`Shell release ${restamped.release}: ${restamped.files.length} precached files`);
+    return;
+  }
+  if (command === "pyramid"){
+    const result = await extendLakePyramid({
+      slugs:(args.slug || "").split(",").map(item => item.trim()).filter(Boolean),
+      minZoom:Number(args["min-zoom"]),
+      outputRoot,
+      generatedAt:args["generated-at"] || undefined,
+      serviceWorkerPath
+    });
+    result.packages.forEach(item => console.log(`Package ${item.slug} ${item.release}: +${item.synthesized} downscaled tiles`));
     return;
   }
   if (command !== "build") throw new Error(`Unknown command ${command}`);
