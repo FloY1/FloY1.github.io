@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 
 import path from "node:path";
-import zlib from "node:zlib";
 import { fileURLToPath } from "node:url";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 
-const PNG_MAGIC = Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
 const MAX_LAT = 85.05112878;
+
+const DEEPER_ENDPOINT = "https://c-triton.fishdeeper.com/web/v1/tile/global/{x}/{y}/{z}.vector";
+const DEEPER_CID = "00000000-0000-0000-0000-000000000000";
+const GEOMETRY_ZOOM = 18;
+const LABEL_MIN_ZOOM = 12;
+const LABEL_MAX_ZOOM = 18;
+const DEPTH_STEP_CM = 33;
+const TILE_ZOOMS = [12, 13, 14, 15, 16, 17, 18];
 
 function visitCoordinates(value, visitor){
   if (!Array.isArray(value)) throw new Error("GeoJSON coordinates must be arrays");
@@ -61,15 +67,25 @@ export function tilesForBbox(bbox, zoom){
   return tiles;
 }
 
-export function zoomRange(value){
-  const text = String(value == null ? "" : value).trim();
-  const match = /^(\d+)(?:-(\d+))?$/.exec(text);
-  if (!match) throw new Error("Zoom must be N or N-M");
-  const min = Number(match[1]);
-  const max = match[2] === undefined ? min : Number(match[2]);
-  if (!Number.isInteger(min) || !Number.isInteger(max) || min < 0 || max > 22) throw new Error("Zoom must be an integer from 0 to 22");
-  if (min > max) throw new Error("Zoom range must go from low to high");
-  return [min, max];
+// Largest zoom at which the bbox still fits into a viewport x viewport CSS-px map,
+// minus one (an overview with margin). Clamped to 3..15: the app has no base layer below.
+export function computeMinZoom(bbox, options = {}){
+  const viewport = options.viewport ?? 512;
+  const tileSize = options.tileSize ?? 256;
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const worldX = lon => (lon + 180) / 360;
+  const worldY = lat => {
+    const safeLat = Math.max(-MAX_LAT, Math.min(MAX_LAT, lat));
+    return (1 - Math.asinh(Math.tan(safeLat * Math.PI / 180)) / Math.PI) / 2;
+  };
+  const spanX = Math.abs(worldX(maxLon) - worldX(minLon));
+  const spanY = Math.abs(worldY(minLat) - worldY(maxLat));
+  let fits = 0;
+  for (let zoom = 0; zoom <= 22; zoom++){
+    const scale = tileSize * 2 ** zoom;
+    if (spanX * scale <= viewport && spanY * scale <= viewport) fits = zoom;
+  }
+  return Math.max(3, Math.min(15, fits - 1));
 }
 
 function clipRing(ring, rect){
@@ -187,120 +203,276 @@ export async function fetchOsmBoundary(osmId, options = {}){
   return geometry;
 }
 
-function isPng(buffer){
-  return buffer.length >= PNG_MAGIC.length && buffer.subarray(0, PNG_MAGIC.length).equals(PNG_MAGIC);
-}
 function releaseFromTimestamp(generatedAt){
   return new Date(generatedAt).toISOString().replace(/[:.]/g, "-");
 }
 
-export function decodeRgbaPng(buffer){
-  if (!isPng(buffer)) throw new Error("Tile is not a PNG");
-  let offset = 8;
-  let width = 0, height = 0, header = null;
-  const idat = [];
-  while (offset + 8 <= buffer.length){
-    const length = buffer.readUInt32BE(offset);
-    const type = buffer.toString("latin1", offset + 4, offset + 8);
-    const data = buffer.subarray(offset + 8, offset + 8 + length);
-    if (type === "IHDR"){
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-      header = { bitDepth:data[8], colorType:data[9], interlace:data[12] };
-    } else if (type === "IDAT") idat.push(data);
-    else if (type === "IEND") break;
-    offset += 12 + length;
-  }
-  if (!header || header.bitDepth !== 8 || header.colorType !== 6 || header.interlace !== 0){
-    throw new Error("Only 8-bit non-interlaced RGBA PNG tiles are supported");
-  }
-  const stride = width * 4;
-  const raw = zlib.inflateSync(Buffer.concat(idat));
-  if (raw.length !== (stride + 1) * height) throw new Error("PNG payload size mismatch");
-  const pixels = Buffer.allocUnsafe(stride * height);
-  for (let y = 0; y < height; y++){
-    const filter = raw[y * (stride + 1)];
-    const row = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
-    const out = pixels.subarray(y * stride, (y + 1) * stride);
-    const prev = y ? pixels.subarray((y - 1) * stride, y * stride) : null;
-    for (let x = 0; x < stride; x++){
-      const left = x >= 4 ? out[x - 4] : 0;
-      const up = prev ? prev[x] : 0;
-      const upLeft = prev && x >= 4 ? prev[x - 4] : 0;
-      let value = row[x];
-      if (filter === 1) value += left;
-      else if (filter === 2) value += up;
-      else if (filter === 3) value += (left + up) >> 1;
-      else if (filter === 4){
-        const initial = left + up - upLeft;
-        const viaLeft = Math.abs(initial - left);
-        const viaUp = Math.abs(initial - up);
-        const viaUpLeft = Math.abs(initial - upLeft);
-        value += viaLeft <= viaUp && viaLeft <= viaUpLeft ? left : viaUp <= viaUpLeft ? up : upLeft;
-      } else if (filter !== 0) throw new Error(`Unsupported PNG filter ${filter}`);
-      out[x] = value & 0xff;
+// --- Deeper vector tile parser (Mapbox Vector Tile v2, no dependencies) ---
+
+function readVarint(buffer, cursor){
+  let shift = 0;
+  let result = 0;
+  let byte;
+  do {
+    if (cursor.offset >= buffer.length) throw new Error("Vector tile varint runs past the end of the buffer");
+    byte = buffer[cursor.offset++];
+    result += (byte & 0x7f) * 2 ** shift;
+    shift += 7;
+  } while (byte & 0x80);
+  return result;
+}
+
+function zigzag(value){
+  return (value >>> 1) ^ -(value & 1);
+}
+
+function readMessageFields(buffer, start, end){
+  const fields = [];
+  const cursor = { offset:start };
+  while (cursor.offset < end){
+    const key = readVarint(buffer, cursor);
+    const field = key >>> 3;
+    const wire = key & 7;
+    if (wire === 0){
+      fields.push({ field, value:readVarint(buffer, cursor) });
+    } else if (wire === 2){
+      const length = readVarint(buffer, cursor);
+      const chunkStart = cursor.offset;
+      cursor.offset += length;
+      fields.push({ field, start:chunkStart, end:chunkStart + length });
+    } else if (wire === 5){
+      fields.push({ field, value:buffer.readFloatLE(cursor.offset) });
+      cursor.offset += 4;
+    } else if (wire === 1){
+      fields.push({ field, value:buffer.readDoubleLE(cursor.offset) });
+      cursor.offset += 8;
+    } else {
+      throw new Error(`Unsupported protobuf wire type ${wire}`);
     }
   }
-  return { width, height, pixels };
+  return fields;
 }
 
-function pngChunk(type, data){
-  const chunk = Buffer.allocUnsafe(12 + data.length);
-  chunk.writeUInt32BE(data.length, 0);
-  chunk.write(type, 4, "latin1");
-  data.copy(chunk, 8);
-  chunk.writeUInt32BE(zlib.crc32(chunk.subarray(4, 8 + data.length)), 8 + data.length);
-  return chunk;
+function readPackedVarints(buffer, start, end){
+  const values = [];
+  const cursor = { offset:start };
+  while (cursor.offset < end) values.push(readVarint(buffer, cursor));
+  return values;
 }
 
-export function encodeRgbaPng(width, height, pixels){
-  const stride = width * 4;
-  if (pixels.length !== stride * height) throw new Error("Pixel buffer size mismatch");
-  const raw = Buffer.allocUnsafe((stride + 1) * height);
-  for (let y = 0; y < height; y++){
-    raw[y * (stride + 1)] = 0;
-    pixels.copy(raw, y * (stride + 1) + 1, y * stride, (y + 1) * stride);
+function decodeValue(buffer, start, end){
+  for (const field of readMessageFields(buffer, start, end)){
+    if (field.field === 1) return buffer.toString("utf8", field.start, field.end);
+    if (field.field === 2 || field.field === 3) return field.value;
+    if (field.field === 4 || field.field === 5) return field.value;
+    if (field.field === 6) return zigzag(field.value);
+    if (field.field === 7) return Boolean(field.value);
   }
-  const ihdr = Buffer.allocUnsafe(13);
-  ihdr.writeUInt32BE(width, 0);
-  ihdr.writeUInt32BE(height, 4);
-  ihdr[8] = 8;
-  ihdr[9] = 6;
-  ihdr[10] = 0;
-  ihdr[11] = 0;
-  ihdr[12] = 0;
-  return Buffer.concat([
-    PNG_MAGIC,
-    pngChunk("IHDR", ihdr),
-    pngChunk("IDAT", zlib.deflateSync(raw, { level:9 })),
-    pngChunk("IEND", Buffer.alloc(0))
-  ]);
+  return null;
 }
 
-function downscaleIntoQuadrant(child, parent, size, offsetX, offsetY){
-  const half = size / 2;
-  for (let y = 0; y < half; y++){
-    for (let x = 0; x < half; x++){
-      let red = 0, green = 0, blue = 0, alpha = 0;
-      for (let dy = 0; dy < 2; dy++){
-        for (let dx = 0; dx < 2; dx++){
-          const index = ((y * 2 + dy) * size + x * 2 + dx) * 4;
-          const weight = child[index + 3];
-          red += child[index] * weight;
-          green += child[index + 1] * weight;
-          blue += child[index + 2] * weight;
-          alpha += weight;
+function decodeGeometry(commands){
+  const rings = [];
+  let current = null;
+  let x = 0;
+  let y = 0;
+  let index = 0;
+  while (index < commands.length){
+    const command = commands[index] & 7;
+    const count = commands[index] >> 3;
+    index++;
+    if (command === 1){
+      for (let step = 0; step < count; step++){
+        x += zigzag(commands[index++]);
+        y += zigzag(commands[index++]);
+        current = [[x, y]];
+        rings.push(current);
+      }
+    } else if (command === 2){
+      for (let step = 0; step < count; step++){
+        x += zigzag(commands[index++]);
+        y += zigzag(commands[index++]);
+        current.push([x, y]);
+      }
+    } else if (command === 7){
+      if (current && current.length) current.push(current[0].slice());
+    }
+  }
+  return rings;
+}
+
+// Decodes a Deeper MVT tile buffer into layers with fully decoded features.
+// Geometry stays in tile pixel coordinates (extent grid); properties are keyed by name.
+export function parseVectorTile(buffer){
+  const bytes = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  const layers = [];
+  for (const field of readMessageFields(bytes, 0, bytes.length)){
+    if (field.field !== 3 || field.start === undefined) continue;
+    const layer = { name:"", extent:4096, features:[] };
+    const keys = [];
+    const values = [];
+    const featureRanges = [];
+    for (const entry of readMessageFields(bytes, field.start, field.end)){
+      if (entry.field === 1) layer.name = bytes.toString("utf8", entry.start, entry.end);
+      else if (entry.field === 5) layer.extent = entry.value;
+      else if (entry.field === 3) keys.push(bytes.toString("utf8", entry.start, entry.end));
+      else if (entry.field === 4) values.push(decodeValue(bytes, entry.start, entry.end));
+      else if (entry.field === 2) featureRanges.push(entry);
+    }
+    for (const range of featureRanges){
+      const feature = { id:null, type:0, properties:{}, geometry:[] };
+      let tags = [];
+      let geometry = [];
+      for (const entry of readMessageFields(bytes, range.start, range.end)){
+        if (entry.field === 1) feature.id = entry.value;
+        else if (entry.field === 3) feature.type = entry.value;
+        else if (entry.field === 2) tags = readPackedVarints(bytes, entry.start, entry.end);
+        else if (entry.field === 4) geometry = readPackedVarints(bytes, entry.start, entry.end);
+      }
+      for (let i = 0; i + 1 < tags.length; i += 2) feature.properties[keys[tags[i]]] = values[tags[i + 1]];
+      feature.geometry = decodeGeometry(geometry);
+      layer.features.push(feature);
+    }
+    layers.push(layer);
+  }
+  return layers;
+}
+
+// Converts a tile pixel coordinate into WGS84 [lon, lat].
+export function tilePixelToLonLat(tile, px, py, extent = 4096){
+  const scale = 2 ** tile.z;
+  const lon = (tile.x + px / extent) / scale * 360 - 180;
+  const lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * (tile.y + py / extent) / scale))) * 180 / Math.PI;
+  return [lon, lat];
+}
+
+function round7(value){
+  return Math.round(value * 1e7) / 1e7;
+}
+
+function ringSignedArea(ring){
+  let area = 0;
+  for (let index = 0; index + 1 < ring.length; index++){
+    area += ring[index][0] * ring[index + 1][1] - ring[index + 1][0] * ring[index][1];
+  }
+  return area / 2;
+}
+
+// Groups a feature's rings into GeoJSON polygons: a positive-area ring (in tile
+// coordinates) starts a new polygon, a negative-area ring is a hole of the last one.
+function ringsToPolygons(rings){
+  const polygons = [];
+  for (const ring of rings){
+    if (ring.length < 4) continue;
+    if (ringSignedArea(ring) > 0) polygons.push([ring]);
+    else if (polygons.length) polygons[polygons.length - 1].push(ring);
+    else polygons.push([ring]);
+  }
+  return polygons;
+}
+
+// Geographic rectangle [minLon, minLat, maxLon, maxLat] covered by a tile's own
+// extent grid (px/py 0..extent); the tiler adds a 256-unit buffer around it.
+function tileGeoRect(tile, extent){
+  const [lonMin, latMax] = tilePixelToLonLat(tile, 0, 0, extent);
+  const [lonMax, latMin] = tilePixelToLonLat(tile, extent, extent, extent);
+  return [lonMin, latMin, lonMax, latMax];
+}
+
+function intersectRect(a, b){
+  const rect = [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+  return rect[0] < rect[2] && rect[1] < rect[3] ? rect : null;
+}
+
+function clipTilePolygon(polygon, tile, extent, rect){
+  const output = [];
+  for (let index = 0; index < polygon.length; index++){
+    const ring = polygon[index].map(([px, py]) => tilePixelToLonLat(tile, px, py, extent));
+    const first = ring[0];
+    const last = ring[ring.length - 1];
+    if (first[0] !== last[0] || first[1] !== last[1]) ring.push(first.slice());
+    const clipped = clipRing(ring, rect);
+    if (!clipped){
+      if (index === 0) return null;
+      continue;
+    }
+    output.push(clipped.map(([lon, lat]) => [round7(lon), round7(lat)]));
+  }
+  return output.length ? output : null;
+}
+
+// Builds bathymetry.json from decoded Deeper tiles: depth bands from the geometry
+// zoom (z18), labels from every z12..z18 level. Tiles: [{ z, x, y, buffer }].
+export function assembleBathymetry(tiles, bbox, options = {}){
+  const geometryZoom = options.geometryZoom ?? GEOMETRY_ZOOM;
+  const bands = new Map();
+  const labels = {};
+  const labelSeen = new Map();
+  for (const tile of tiles){
+    if (!tile.buffer || !tile.buffer.length) continue;
+    const layers = parseVectorTile(tile.buffer);
+    if (tile.z === geometryZoom){
+      const depth = layers.find(layer => layer.name === "depth");
+      // Clip depth rings to the tile's OWN extent first (removes the 256-unit
+      // buffer overlap that would otherwise paint a neighbour's band across a
+      // seam), intersected with the package bbox as the second step.
+      if (depth){
+        const clipRect = intersectRect(tileGeoRect(tile, depth.extent), bbox);
+        if (clipRect){
+          for (const feature of depth.features){
+            if (feature.type !== 3) continue;
+            const depthValue = Number(feature.properties.depth) || 0;
+            const depthMaxValue = Number(feature.properties.depth_max) || depthValue + DEPTH_STEP_CM;
+            let band = bands.get(depthValue);
+            if (!band){
+              band = { depth:depthValue, depthMax:depthMaxValue, polygons:[] };
+              bands.set(depthValue, band);
+            } else {
+              band.depthMax = Math.max(band.depthMax, depthMaxValue);
+            }
+            for (const polygon of ringsToPolygons(feature.geometry)){
+              const clipped = clipTilePolygon(polygon, tile, depth.extent, clipRect);
+              if (clipped) band.polygons.push(clipped);
+            }
+          }
         }
       }
-      const out = ((offsetY + y) * size + offsetX + x) * 4;
-      parent[out] = alpha ? Math.round(red / alpha) : 0;
-      parent[out + 1] = alpha ? Math.round(green / alpha) : 0;
-      parent[out + 2] = alpha ? Math.round(blue / alpha) : 0;
-      parent[out + 3] = Math.round(alpha / 4);
+    }
+    if (tile.z >= LABEL_MIN_ZOOM && tile.z <= LABEL_MAX_ZOOM){
+      const layer = layers.find(item => item.name === "depth_labels");
+      if (layer){
+        const key = String(tile.z);
+        const bucket = labels[key] || (labels[key] = []);
+        let seen = labelSeen.get(key);
+        if (!seen){
+          seen = new Set();
+          labelSeen.set(key, seen);
+        }
+        for (const feature of layer.features){
+          if (feature.type !== 1) continue;
+          const point = feature.geometry[0] && feature.geometry[0][0];
+          if (!point) continue;
+          // Drop points that fall in the tile buffer (outside 0..extent): the
+          // neighbouring tile owns them, so this avoids cross-tile duplicates.
+          if (point[0] < 0 || point[0] > layer.extent || point[1] < 0 || point[1] > layer.extent) continue;
+          const [lon, lat] = tilePixelToLonLat(tile, point[0], point[1], layer.extent);
+          const roundedLon = round7(lon);
+          const roundedLat = round7(lat);
+          const text = feature.properties.dl_m == null ? "" : String(feature.properties.dl_m);
+          const id = `${roundedLon},${roundedLat},${text}`;
+          if (seen.has(id)) continue;
+          seen.add(id);
+          bucket.push([roundedLon, roundedLat, text]);
+        }
+      }
     }
   }
+  const bandList = [...bands.values()]
+    .filter(band => band.polygons.length)
+    .sort((left, right) => left.depth - right.depth);
+  const depthMax = bandList.reduce((max, band) => Math.max(max, band.depthMax), 0);
+  return { depthUnit:"cm", depthStep:DEPTH_STEP_CM, depthMax, bands:bandList, labels };
 }
-
 
 async function readJson(file, fallback){
   try {
@@ -435,8 +607,6 @@ export async function restampShell(options){
   return { release, generatedAt, files };
 }
 
-
-
 async function collectFiles(directory, relative = ""){
   const entries = await readdir(directory, { withFileTypes:true });
   const files = [];
@@ -449,44 +619,62 @@ async function collectFiles(directory, relative = ""){
   return files;
 }
 
-async function downloadTile(tile, options){
-  const relative = `${tile.z}/${tile.x}/${tile.y}.png`;
-  const destination = path.join(options.packageDir, "tiles", relative);
-  if (options.resumeDir){
-    try {
-      const cached = await readFile(path.join(options.resumeDir, "tiles", relative));
-      if (isPng(cached)){
-        await mkdir(path.dirname(destination), { recursive:true });
-        await writeFile(destination, cached);
-        return false;
-      }
-    } catch(error){
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
+function defaultSleep(ms){
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-  const endpoint = options.endpoint
-    .replace("{z}", String(tile.z))
+async function fetchDeeperTile(tile, options){
+  if (!options.token) throw new Error(`Tile ${tile.z}/${tile.x}/${tile.y} is missing from the cache and DEEPER_TOKEN is empty`);
+  const url = new URL(options.endpoint
     .replace("{x}", String(tile.x))
-    .replace("{y}", String(tile.y));
-  const url = new URL(endpoint);
-  url.searchParams.set("config", options.config);
-  url.searchParams.set("transparent", "true");
-  url.searchParams.set("du", "1");
-  url.searchParams.set("layer", "1");
-  const response = await options.fetchImpl(url, {
-    headers:{
-      accept:"*/*",
-      authorization:`Bearer ${options.token}`,
-      origin:"https://by.fishermap.org",
-      referer:"https://by.fishermap.org/"
+    .replace("{y}", String(tile.y))
+    .replace("{z}", String(tile.z)));
+  url.searchParams.set("token", options.token);
+  url.searchParams.set("cid", options.cid);
+  let delay = options.backoff;
+  for (let attempt = 1; ; attempt++){
+    let response;
+    try {
+      response = await options.fetchImpl(url, {
+        headers:{
+          accept:"*/*",
+          origin:"https://maps.fishdeeper.com",
+          referer:"https://maps.fishdeeper.com/",
+          "user-agent":"Mozilla/5.0 (karta-dna-site lake package builder)"
+        }
+      });
+    } catch(error){
+      if (attempt >= options.retries) throw error;
+      await options.sleep(delay);
+      delay *= 2;
+      continue;
     }
-  });
-  if (!response.ok) throw new Error(`Tile ${tile.z}/${tile.x}/${tile.y} returned HTTP ${response.status}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!isPng(buffer)) throw new Error(`Tile ${tile.z}/${tile.x}/${tile.y} is not a PNG`);
-  await writeFileAtomic(destination, buffer);
-  return true;
+    if (response.status === 200) return Buffer.from(await response.arrayBuffer());
+    if (response.status === 404) return Buffer.alloc(0);
+    if (response.status === 403) throw new Error("Deeper token expired (HTTP 403)");
+    if (response.status === 504){
+      if (attempt >= options.retries) throw new Error(`Tile ${tile.z}/${tile.x}/${tile.y} kept timing out after ${options.retries} attempts`);
+      await options.sleep(delay);
+      delay *= 2;
+      continue;
+    }
+    throw new Error(`Tile ${tile.z}/${tile.x}/${tile.y} returned HTTP ${response.status}`);
+  }
+}
+
+// Reads a tile from the .deeper-cache first (0-byte file = downloaded empty tile);
+// on a miss fetches from the network and stores it without overwriting existing files.
+async function loadTile(tile, options){
+  const relative = `${tile.z}/${tile.x}/${tile.y}.mvt`;
+  const cachePath = path.join(options.cacheDir, relative);
+  try {
+    return { buffer:await readFile(cachePath), fromCache:true };
+  } catch(error){
+    if (error.code !== "ENOENT") throw error;
+  }
+  const buffer = await fetchDeeperTile(tile, options);
+  if (!await pathExists(cachePath)) await writeFileAtomic(cachePath, buffer);
+  return { buffer, fromCache:false };
 }
 
 async function runWorkers(items, concurrency, worker){
@@ -500,171 +688,143 @@ async function runWorkers(items, concurrency, worker){
   await Promise.all(Array.from({ length:Math.min(concurrency, items.length) }, run));
 }
 
-export async function buildLakePackage(options){
-  const {
-    slug,
-    name,
-    type,
-    boundary,
-    clip,
-    zoom,
-    config,
-    token,
-    outputRoot,
-    endpoint = "https://tile1.navionics.com/viewer/api/v1/tile/{z}/{x}/{y}",
-    generatedAt:generatedAtInput = new Date().toISOString(),
-    fetchImpl = fetch,
-    concurrency = 6,
-    serviceWorkerPath
-  } = options;
+function resolveTileOptions(options){
+  return {
+    token:options.token ?? process.env.DEEPER_TOKEN ?? "",
+    cacheDir:options.cacheDir ?? path.resolve(".deeper-cache"),
+    endpoint:options.endpoint ?? DEEPER_ENDPOINT,
+    cid:options.cid ?? DEEPER_CID,
+    fetchImpl:options.fetchImpl ?? fetch,
+    concurrency:options.concurrency ?? 3,
+    retries:options.retries ?? 6,
+    backoff:options.backoff ?? 2000,
+    sleep:options.sleep ?? defaultSleep
+  };
+}
+
+// Builds one package into an immutable release WITHOUT touching the shared
+// registry/precache/index.json - the caller publishes those once for the batch.
+async function stagePackage(pkg, shared){
+  const { slug, name, type, boundary, clip } = pkg;
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug || "")) throw new Error("Slug must be kebab-case ASCII");
   if (typeof name !== "string" || !name.trim()) throw new Error("Name is required");
   if (!["lake", "reservoir", "river"].includes(type)) throw new Error("Type must be lake, reservoir or river");
-  if (typeof config !== "string" || !config || typeof token !== "string" || !token) throw new Error("Navionics config and token are required");
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 32) throw new Error("Concurrency must be an integer from 1 to 32");
-  if (typeof generatedAtInput !== "string" || Number.isNaN(Date.parse(generatedAtInput))) throw new Error("Generated timestamp must be ISO-8601");
 
-  const generatedAt = new Date(generatedAtInput).toISOString();
-  const release = releaseFromTimestamp(generatedAt);
   const geometry = clip ? clipGeometryToBbox(boundary, clip) : boundary;
   const bbox = bboxFromGeometry(geometry);
-  const [minZoom, maxZoom] = zoomRange(zoom);
+  const minZoom = computeMinZoom(bbox);
+  const maxZoom = 22;
+
   const tiles = [];
-  for (let level = minZoom; level <= maxZoom; level++) tiles.push(...tilesForBbox(bbox, level));
-  const manifest = {
-    slug,
-    release,
-    name:name.trim(),
-    type,
-    crs:"EPSG:3857",
-    tileSize:256,
-    minZoom,
-    maxZoom,
-    du:1,
-    bbox,
-    center:[(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2],
-    boundary:geometry,
-    source:"Navionics SonarChart (layer=1, du=1)",
-    attribution:"© Navionics/Garmin, © OpenStreetMap",
-    generatedAt
-  };
+  for (const level of TILE_ZOOMS){
+    for (const tile of tilesForBbox(bbox, level)) tiles.push(tile);
+  }
 
-  const registry = await readRegistry(outputRoot, generatedAt);
-  const serviceWorker = await prepareServiceWorker(serviceWorkerPath, generatedAt);
-  const existingIndex = registry.waterbodies.findIndex(item => item.slug === slug);
-  const existing = existingIndex >= 0 ? registry.waterbodies[existingIndex] : null;
-
-  const packageRoot = path.join(outputRoot, slug);
-  const packageDir = path.join(packageRoot, release);
+  const packageDir = path.join(shared.outputRoot, slug, shared.release);
   const stagingDir = `${packageDir}.staging`;
-  const resumeDir = existing
-    ? path.join(packageRoot, existing.release)
-    : await pathExists(packageDir) ? packageDir : null;
   await rm(stagingDir, { recursive:true, force:true });
   await mkdir(stagingDir, { recursive:true });
 
   let downloaded = 0;
   try {
-    await runWorkers(tiles, concurrency, async tile => {
-      if (await downloadTile(tile, {
-        packageDir:stagingDir,
-        resumeDir,
-        endpoint,
-        config,
-        token,
-        fetchImpl
-      })) downloaded++;
+    const loaded = new Array(tiles.length);
+    await runWorkers(tiles.map((tile, index) => ({ tile, index })), shared.tile.concurrency, async ({ tile, index }) => {
+      const result = await loadTile(tile, shared.tile);
+      if (!result.fromCache) downloaded++;
+      loaded[index] = { z:tile.z, x:tile.x, y:tile.y, buffer:result.buffer };
     });
+    const bathymetry = assembleBathymetry(loaded, bbox);
+    const manifest = {
+      slug,
+      release:shared.release,
+      name:name.trim(),
+      type,
+      format:2,
+      bathymetry:"bathymetry.json",
+      minZoom,
+      maxZoom,
+      bbox,
+      center:[(bbox[1] + bbox[3]) / 2, (bbox[0] + bbox[2]) / 2],
+      boundary:geometry,
+      source:"Deeper fishdeeper.com (vector z18)",
+      attribution:"© Deeper, © OpenStreetMap",
+      generatedAt:shared.generatedAt
+    };
+    await writeFileAtomic(path.join(stagingDir, "bathymetry.json"), JSON.stringify(bathymetry, null, 2) + "\n");
     await writeFileAtomic(path.join(stagingDir, "lake.json"), JSON.stringify(manifest, null, 2) + "\n");
     await publishRelease(stagingDir, packageDir);
+    return {
+      summary:{ slug, release:shared.release, name:manifest.name, type, center:manifest.center, bbox },
+      manifest,
+      tileCount:tiles.length,
+      downloaded,
+      bands:bathymetry.bands.length
+    };
   } catch(error){
     await rm(stagingDir, { recursive:true, force:true });
     throw error;
   }
-
-  const summary = { slug, release, name:manifest.name, type, center:manifest.center, bbox };
-  if (existingIndex >= 0) registry.waterbodies[existingIndex] = summary;
-  else registry.waterbodies.push(summary);
-  await publishRegistry(outputRoot, registry, generatedAt, serviceWorker);
-  return { manifest, tileCount:tiles.length, downloaded };
 }
 
-export async function extendLakePyramid(options){
-  const {
-    slugs,
-    minZoom,
-    outputRoot,
-    generatedAt:generatedAtInput = new Date().toISOString(),
-    serviceWorkerPath
-  } = options;
-  if (!Array.isArray(slugs) || !slugs.length) throw new Error("Pass at least one package slug");
-  if (!Number.isInteger(minZoom) || minZoom < 0 || minZoom > 22) throw new Error("Min zoom must be an integer from 0 to 22");
+export async function buildLakePackage(options){
+  const generatedAtInput = options.generatedAt ?? new Date().toISOString();
+  const tile = resolveTileOptions(options);
+  if (!Number.isInteger(tile.concurrency) || tile.concurrency < 1 || tile.concurrency > 3) throw new Error("Concurrency must be an integer from 1 to 3");
+  if (typeof generatedAtInput !== "string" || Number.isNaN(Date.parse(generatedAtInput))) throw new Error("Generated timestamp must be ISO-8601");
+
+  const generatedAt = new Date(generatedAtInput).toISOString();
+  const release = releaseFromTimestamp(generatedAt);
+  const registry = await readRegistry(options.outputRoot, generatedAt);
+  const serviceWorker = await prepareServiceWorker(options.serviceWorkerPath, generatedAt);
+
+  const staged = await stagePackage(
+    { slug:options.slug, name:options.name, type:options.type, boundary:options.boundary, clip:options.clip },
+    { outputRoot:options.outputRoot, generatedAt, release, tile }
+  );
+  const existingIndex = registry.waterbodies.findIndex(item => item.slug === options.slug);
+  if (existingIndex >= 0) registry.waterbodies[existingIndex] = staged.summary;
+  else registry.waterbodies.push(staged.summary);
+  await publishRegistry(options.outputRoot, registry, generatedAt, serviceWorker);
+  return { manifest:staged.manifest, tileCount:staged.tileCount, downloaded:staged.downloaded, bands:staged.bands };
+}
+
+// Builds several packages into ONE release: stage and publish every package, then
+// write registry/precache/index.json and stamp SW_VERSION once for all slugs.
+export async function buildLakePackageBatch(options){
+  const { packages, outputRoot, serviceWorkerPath } = options;
+  if (!Array.isArray(packages) || !packages.length) throw new Error("Batch must contain at least one package");
+  const generatedAtInput = options.generatedAt ?? new Date().toISOString();
+  const tile = resolveTileOptions(options);
+  if (!Number.isInteger(tile.concurrency) || tile.concurrency < 1 || tile.concurrency > 3) throw new Error("Concurrency must be an integer from 1 to 3");
   if (typeof generatedAtInput !== "string" || Number.isNaN(Date.parse(generatedAtInput))) throw new Error("Generated timestamp must be ISO-8601");
 
   const generatedAt = new Date(generatedAtInput).toISOString();
   const release = releaseFromTimestamp(generatedAt);
   const registry = await readRegistry(outputRoot, generatedAt);
   const serviceWorker = await prepareServiceWorker(serviceWorkerPath, generatedAt);
-  const packages = [];
-  for (const slug of slugs){
-    const existingIndex = registry.waterbodies.findIndex(item => item.slug === slug);
-    if (existingIndex < 0) throw new Error(`Package ${slug} is not published`);
-    const existing = registry.waterbodies[existingIndex];
-    const currentDir = path.join(outputRoot, slug, existing.release);
-    const manifest = await readJson(path.join(currentDir, "lake.json"), null);
-    if (!manifest) throw new Error(`Manifest for ${slug} is missing`);
-    if (minZoom >= manifest.minZoom) throw new Error(`Package ${slug} already starts at z${manifest.minZoom}`);
-    const size = manifest.tileSize;
-    if (!Number.isInteger(size) || size < 2 || size % 2) throw new Error(`Package ${slug} has an invalid tile size`);
+  const shared = { outputRoot, generatedAt, release, tile };
 
-    const packageDir = path.join(outputRoot, slug, release);
-    const stagingDir = `${packageDir}.staging`;
-    await rm(stagingDir, { recursive:true, force:true });
-    await mkdir(stagingDir, { recursive:true });
-    let synthesized = 0;
-    try {
-      for (const file of await collectFiles(currentDir)){
-        if (!file.startsWith("tiles/")) continue;
-        const destination = path.join(stagingDir, file);
-        await mkdir(path.dirname(destination), { recursive:true });
-        await writeFile(destination, await readFile(path.join(currentDir, file)));
-      }
-      for (let level = manifest.minZoom - 1; level >= minZoom; level--){
-        for (const tile of tilesForBbox(manifest.bbox, level)){
-          const parent = Buffer.alloc(size * size * 4);
-          for (const [dx, dy] of [[0,0],[1,0],[0,1],[1,1]]){
-            const childFile = path.join(stagingDir, "tiles", String(level + 1), String(tile.x * 2 + dx), `${tile.y * 2 + dy}.png`);
-            let content;
-            try {
-              content = await readFile(childFile);
-            } catch(error){
-              if (error.code !== "ENOENT") throw error;
-              continue;
-            }
-            const child = decodeRgbaPng(content);
-            if (child.width !== size || child.height !== size){
-              throw new Error(`Tile ${level + 1}/${tile.x * 2 + dx}/${tile.y * 2 + dy} of ${slug} is not ${size}x${size}`);
-            }
-            downscaleIntoQuadrant(child.pixels, parent, size, dx * size / 2, dy * size / 2);
-          }
-          const destination = path.join(stagingDir, "tiles", String(level), String(tile.x), `${tile.y}.png`);
-          await mkdir(path.dirname(destination), { recursive:true });
-          await writeFile(destination, encodeRgbaPng(size, size, parent));
-          synthesized++;
-        }
-      }
-      const updated = { ...manifest, release, minZoom, generatedAt };
-      await writeFileAtomic(path.join(stagingDir, "lake.json"), JSON.stringify(updated, null, 2) + "\n");
-      await publishRelease(stagingDir, packageDir);
-    } catch(error){
-      await rm(stagingDir, { recursive:true, force:true });
-      throw error;
-    }
-    registry.waterbodies[existingIndex] = { ...existing, release };
-    packages.push({ slug, release, synthesized });
+  const built = [];
+  let tileCount = 0;
+  let downloaded = 0;
+  for (const pkg of packages){
+    const staged = await stagePackage(pkg, shared);
+    const existingIndex = registry.waterbodies.findIndex(item => item.slug === pkg.slug);
+    if (existingIndex >= 0) registry.waterbodies[existingIndex] = staged.summary;
+    else registry.waterbodies.push(staged.summary);
+    built.push({ slug:pkg.slug, release, bands:staged.bands, tileCount:staged.tileCount, downloaded:staged.downloaded });
+    tileCount += staged.tileCount;
+    downloaded += staged.downloaded;
   }
   await publishRegistry(outputRoot, registry, generatedAt, serviceWorker);
-  return { release, generatedAt, packages };
+  return { release, generatedAt, packages:built, tileCount, downloaded };
+}
+
+async function loadBoundaryFile(file){
+  const source = JSON.parse(await readFile(file, "utf8"));
+  return Array.isArray(source.elements)
+    ? polygonFromOverpass(source)
+    : source.type === "Feature" ? source.geometry : source;
 }
 
 function parseArgs(argv){
@@ -695,30 +855,43 @@ async function main(){
     console.log(`Shell release ${restamped.release}: ${restamped.files.length} precached files`);
     return;
   }
-  if (command === "pyramid"){
-    const result = await extendLakePyramid({
-      slugs:(args.slug || "").split(",").map(item => item.trim()).filter(Boolean),
-      minZoom:Number(args["min-zoom"]),
+  if (command !== "build") throw new Error(`Unknown command ${command}`);
+  if (args.batch){
+    const spec = JSON.parse(await readFile(args.batch, "utf8"));
+    if (!Array.isArray(spec) || !spec.length) throw new Error("Batch file must contain a non-empty JSON array of packages");
+    const packages = [];
+    for (const entry of spec){
+      if (!entry || !entry.boundary) throw new Error("Every batch entry needs a boundary geojson path");
+      packages.push({
+        slug:entry.slug,
+        name:entry.name,
+        type:entry.type,
+        boundary:await loadBoundaryFile(path.resolve(entry.boundary)),
+        clip:entry.clip ? String(entry.clip).split(",").map(Number) : undefined
+      });
+    }
+    const batch = await buildLakePackageBatch({
+      packages,
+      token:args.token || process.env.DEEPER_TOKEN,
+      cacheDir:args.cache ? path.resolve(args.cache) : undefined,
       outputRoot,
+      concurrency:args.concurrency ? Number(args.concurrency) : undefined,
       generatedAt:args["generated-at"] || undefined,
       serviceWorkerPath
     });
-    result.packages.forEach(item => console.log(`Package ${item.slug} ${item.release}: +${item.synthesized} downscaled tiles`));
+    console.log(`Batch release ${batch.release}: ${batch.packages.length} packages, ${batch.tileCount} tiles (${batch.downloaded} downloaded)`);
+    batch.packages.forEach(item => console.log(`  ${item.slug}: ${item.bands} depth bands`));
     return;
   }
-  if (command !== "build") throw new Error(`Unknown command ${command}`);
   let geometry;
   if (args.boundary){
-    const source = JSON.parse(await readFile(args.boundary, "utf8"));
-    geometry = Array.isArray(source.elements)
-      ? polygonFromOverpass(source)
-      : source.type === "Feature" ? source.geometry : source;
+    geometry = await loadBoundaryFile(args.boundary);
   } else if (args["osm-id"]){
     geometry = await fetchOsmBoundary(args["osm-id"], {
       endpoint:args.nominatim || undefined
     });
   } else {
-    throw new Error("Pass --boundary <file.geojson> or --osm-id <R123>");
+    throw new Error("Pass --batch <file.json>, --boundary <file.geojson> or --osm-id <R123>");
   }
   const result = await buildLakePackage({
     slug:args.slug,
@@ -726,15 +899,14 @@ async function main(){
     type:args.type,
     boundary:geometry,
     clip:args.clip ? args.clip.split(",").map(Number) : undefined,
-    zoom:args.zoom,
-    config:args.config || process.env.NAVIONICS_CONFIG,
-    token:args.token || process.env.NAVIONICS_TOKEN,
+    token:args.token || process.env.DEEPER_TOKEN,
+    cacheDir:args.cache ? path.resolve(args.cache) : undefined,
     outputRoot,
-    concurrency:args.concurrency ? Number(args.concurrency) : 6,
+    concurrency:args.concurrency ? Number(args.concurrency) : undefined,
     generatedAt:args["generated-at"] || undefined,
-    serviceWorkerPath,
+    serviceWorkerPath
   });
-  console.log(`Package ${result.manifest.slug}: ${result.tileCount} tiles, ${result.downloaded} downloaded`);
+  console.log(`Package ${result.manifest.slug}: ${result.tileCount} tiles (${result.downloaded} downloaded), ${result.bands} depth bands`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)){

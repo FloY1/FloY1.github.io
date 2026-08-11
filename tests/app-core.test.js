@@ -243,3 +243,42 @@ test("validLakeManifest проверяет локальный XYZ пакет и 
   assert.equal(Core.validLakeManifest({ ...valid, bbox:[24.05,49.83,24.02,49.86] }), false);
   assert.equal(Core.validLakeManifest({ ...valid, boundary:{ type:"Point", coordinates:[24.03,49.84] } }), false);
 });
+
+test("validLakeManifest поддерживает векторный формат (format: 2)", () => {
+  const valid = {
+    slug:"gornovo",
+    release:"2026-08-11T10-00-00-000Z",
+    name:"Горново",
+    type:"reservoir",
+    format:2,
+    bathymetry:"bathymetry.json",
+    minZoom:13,
+    maxZoom:22,
+    bbox:[24.02,49.83,24.05,49.86],
+    center:[49.845,24.035],
+    boundary:{ type:"Polygon", coordinates:[[[24.02,49.83],[24.05,49.83],[24.05,49.86],[24.02,49.83]]] }
+  };
+  assert.equal(Core.validLakeManifest(valid), true);
+  assert.equal(Core.validLakeManifest({ ...valid, bathymetry:123 }), false);
+});
+
+test("depthColor вычисляет градиент от #7fd4ff до #0b2e4f", () => {
+  assert.equal(Core.depthColor(0, 1000), "#7fd4ff");
+  assert.equal(Core.depthColor(1000, 1000), "#0b2e4f");
+  assert.equal(Core.depthColor(500, 1000), "#4581a7"); // ~ midpoint
+  // Ограничения
+  assert.equal(Core.depthColor(-10, 1000), "#7fd4ff");
+  assert.equal(Core.depthColor(2000, 1000), "#0b2e4f");
+  assert.equal(Core.depthColor(10, 0), "#0b2e4f"); // depthMax <= 0
+});
+
+test("labelZoom округляет и ограничивает зум [12..18]", () => {
+  assert.equal(Core.labelZoom(10), 12);
+  assert.equal(Core.labelZoom(11.9), 12);
+  assert.equal(Core.labelZoom(12), 12);
+  assert.equal(Core.labelZoom(15.4), 15);
+  assert.equal(Core.labelZoom(15.6), 16);
+  assert.equal(Core.labelZoom(18), 18);
+  assert.equal(Core.labelZoom(18.1), 18);
+  assert.equal(Core.labelZoom(20), 18);
+});

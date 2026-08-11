@@ -2,6 +2,8 @@
 
 Документ описывает воспроизводимый формат данных водоёма, который использует приложение, и шаги подготовки этих данных на этапе разработки. Приложение в рантайме в сеть не ходит: оно только читает готовые пакеты.
 
+Актуальный формат пакета - векторный ([ADR-0010](adr/0010-batimetriya-deeper-vektorom-v-pakete.md)): батиметрия Deeper лежит в `bathymetry.json`. Старые растровые пакеты (XYZ PNG, например `demo-lake`) приложение продолжает читать, но сборщик их больше не производит; их формат описан в конце документа.
+
 ## Расположение файлов
 
 ```
@@ -16,8 +18,7 @@
 │   └── <slug>/
 │       └── <release>/
 │           ├── lake.json           <- манифест водоёма
-│           └── tiles/
-│               └── <z>/<x>/<y>.png <- тайлы батиметрии (Web Mercator XYZ)
+│           └── bathymetry.json     <- полосы глубин и подписи (векторный пакет)
 ```
 
 `<slug>` - латиницей, kebab-case (например `naroch`, `vileyskoe`). `<release>` - безопасная для пути версия из `generatedAt`, например `2026-08-06T12-00-00-000Z`.
@@ -46,140 +47,107 @@
 - `center`: `[lat, lon]` (порядок Leaflet).
 - `bbox`: `[minLon, minLat, maxLon, maxLat]` (WGS84, порядок GeoJSON).
 
-## lakes/<slug>/<release>/lake.json
+## lakes/<slug>/<release>/lake.json (векторный, format 2)
 
 ```json
 {
-  "slug": "naroch",
-  "release": "2026-08-06T00-00-00-000Z",
-  "name": "Нарочь",
-  "type": "lake",
-  "crs": "EPSG:3857",
-  "tileSize": 256,
-  "minZoom": 16,
-  "maxZoom": 16,
-  "du": 1,
-  "bbox": [26.60, 54.82, 26.80, 54.90],
-  "center": [54.8600, 26.7000],
-  "boundary": { "type": "Polygon", "coordinates": [[[26.61, 54.83], [26.79, 54.83]]] },
-  "source": "Navionics SonarChart (layer=1, du=1)",
-  "attribution": "© Navionics/Garmin, © OpenStreetMap",
-  "generatedAt": "2026-08-06T00:00:00.000Z"
+  "slug": "gornovo",
+  "release": "2026-08-10T15-02-47-749Z",
+  "name": "Водохранилище Горново",
+  "type": "reservoir",
+  "format": 2,
+  "bathymetry": "bathymetry.json",
+  "minZoom": 14,
+  "maxZoom": 22,
+  "bbox": [26.2116, 52.0826, 26.2248, 52.0928],
+  "center": [52.0877, 26.2182],
+  "boundary": { "type": "Polygon", "coordinates": [[[26.212, 52.083], [26.224, 52.083]]] },
+  "source": "Deeper fishdeeper.com (vector z18)",
+  "attribution": "© Deeper, © OpenStreetMap",
+  "generatedAt": "2026-08-10T15:02:47.749Z"
 }
 ```
 
 - `boundary`: GeoJSON `Polygon`/`MultiPolygon` в WGS84 (`[lon, lat]`) - береговая линия из OSM.
-- `minZoom`/`maxZoom` - границы пирамиды тайлов. Приложение не даёт уменьшить масштаб ниже `minZoom`: за пределами пирамиды Leaflet начал бы уменьшать тайлы `maxZoom` и держать в памяти весь пакет сразу ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md)).
-- `du`: единицы глубины Navionics (`1` = метры).
+- `minZoom`: наибольший зум, на котором bbox водоёма целиком влезает в экран 512x512 CSS-px, минус 1 (обзор с запасом); вычисляется сборщиком, clamp 3..15. Ниже уходить некуда - базовой подложки в приложении нет.
+- `maxZoom`: всегда 22. Вектор рисуется чётко на любом зуме; пирамиды уровней и потолка `minNativeZoom` у векторного пакета нет ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md) применим только к растровым).
+- `bathymetry`: имя файла батиметрии рядом с манифестом. Признак векторного формата: приложение выбирает векторный путь по наличию этого поля.
 
-## Тайлы
+## bathymetry.json
 
-- Web Mercator XYZ (EPSG:3857), 256x256, исходный PNG с альфой из Navionics (`transparent=true`). PNG сохраняется без перекодирования, чтобы не терять тонкие изобаты и не вводить зависимость от конвертера.
-- Именование - родное `z/x/y` Navionics, чтобы Leaflet брал их шаблоном `lakes/<slug>/<release>/tiles/{z}/{x}/{y}.png` без пересчёта координат.
-- Хранятся только тайлы, пересекающие `bbox` границы.
+```json
+{
+  "depthUnit": "cm",
+  "depthStep": 33,
+  "depthMax": 733,
+  "bands": [
+    { "depth": 0, "depthMax": 33, "polygons": [ [ [ [26.2189, 52.0955], [26.2191, 52.0954] ] ] ] }
+  ],
+  "labels": {
+    "12": [ [26.2189, 52.0955, "2.3"] ],
+    "18": [ [26.2189, 52.0955, "2.3"] ]
+  }
+}
+```
+
+- Все глубины - в сантиметрах, полосы с шагом источника 33 см. `depthMax` корня - максимум `depthMax` полос.
+- `bands` отсортированы по возрастанию `depth`; `polygons` - координаты в формате MultiPolygon GeoJSON (`[полигон][кольцо][точка [lon, lat]]`), округление до 7 знаков.
+- Полигоны из соседних тайлов источника не объединяются: полосы рисуются заливкой без обводки, швы нарезки невидимы. Линии-изобаты потребовали бы polygon union - осознанно отклонено ([ADR-0010](adr/0010-batimetriya-deeper-vektorom-v-pakete.md)).
+- `labels`: ключ - зум источника (`"12"`..`"18"`), значение - массив `[lon, lat, текст в метрах]`. Источник расставляет подписи с плотностью под каждый зум; приложение показывает набор `labels[clamp(round(zoom), 12, 18)]`.
+
+## Источник Deeper
+
+- Тайл: `https://c-triton.fishdeeper.com/web/v1/tile/global/{x}/{y}/{z}.vector?token=<TOKEN>&cid=00000000-0000-0000-0000-000000000000` с заголовками `origin`/`referer: https://maps.fishdeeper.com`. Параметр `tileToken` не нужен.
+- Формат - Mapbox Vector Tile v2 (protobuf, без gzip, extent 4096). Слой `depth`: полигоны полос с `depth`/`depth_min`/`depth_max` в см. Слой `depth_labels`: точки с `dl` (см) и готовыми подписями `dl_m` (метры), `dl_fa`, `dl_ft`.
+- Ответы: `200` с пустым телом - данных нет (валидно); `504` - таймаут генерации тайла, нужен ретрай с бэкоффом; `403` - токен протух; `404` - зум больше 18.
+- Геометрия берётся с `z18` (родной максимум), подписи - со всех уровней `z12`-`z18`. Детализация геометрии почти не растёт с зумом (тайлер упрощает слабо), но подписи на каждом уровне расставлены со своей плотностью.
 
 ## Пайплайн подготовки (воспроизводимо)
 
-Все шаги - на этапе разработки, скриптом. Нужен временный доступ к Navionics через активную сессию by.fishermap.org.
-
-1. Граница из OSM. Передать OSM id в формате `R123`, `W123` или `N123` через `--osm-id`; скрипт получает `Polygon`/`MultiPolygon` из Nominatim lookup. Nominatim индексирует только именованные объекты: для безымянного контура (например, водохранилища `R18103281`) lookup вернёт пустой список. Тогда геометрия берётся из Overpass и передаётся файлом через `--boundary`: файл принимается и как GeoJSON (`Feature`, `Polygon`, `MultiPolygon`), и как ответ Overpass `out geom` - кольца `outer` и `inner` собираются из отдельных ways, острова остаются дырками.
-2. Район работ. Прямоугольник `--clip minLon,minLat,maxLon,maxLat` обрезает границу до нужного участка. Для замкнутого водоёма он не нужен, для реки обязателен: без него `bbox` растянется на всё русло из OSM ([ADR-0008](adr/0008-paket-reki-po-rajonu.md)).
-3. bbox и список тайлов. Из обрезанной границы посчитать `bbox`; на выбранном зуме `Z` получить множество тайлов `z/x/y`, покрывающих `bbox`.
-4. Скачать тайлы. Запрос `https://tile1.navionics.com/viewer/api/v1/tile/{z}/{x}/{y}?config=<JWT>&transparent=true&du=1&layer=1` с заголовками `authorization: Bearer <token>` и `origin`/`referer: https://by.fishermap.org`. `config` - статичный JWT продукта (`rpn`, `apr`); `Bearer` живёт 2 часа. Скрипт пропускает уже скачанные валидные PNG и ограничивает параллелизм.
-5. Чистый staging. Для требуемых `z/x/y` переиспользовать валидные PNG из опубликованного пакета, остальные скачать во временный каталог. Записать туда `lake.json`; старые тайлы, которых нет в новом bbox/zoom, в staging не попадают.
-6. Публикация immutable release. После полной готовности staging одним `rename` публикуется как новый каталог `lakes/<slug>/<release>`. Затем публикуются immutable снимок `lakes/registry/<release>.json` и список `lakes/precache/<release>.json`; как commit marker атомарно заменяется `lakes/index.json` с активным `release`. До смены реестра старый пакет остаётся доступен; после смены реестра приложение получает только уже опубликованный каталог. Повреждённый существующий реестр останавливает сборку и не перезаписывается.
-7. Service worker. Сборщик последним встраивает `generatedAt` в `SW_VERSION` файла `sw.js`; из версии worker получает пути к своим immutable precache и registry. До начала и перед завершением установки worker сверяет опубликованный `lakes/index.json` со своей версией и прерывает install при несовпадении. Versioned registry кэшируется под ключом `lakes/index.json`, поэтому поздняя установка старой версии не смешивает старые пакеты с новым реестром. Новый worker остаётся в ожидании: `skipWaiting()` при установке не вызывается, `clients.claim()` не используется. Приложение показывает кнопку «Обновить приложение», по ней worker получает `{ type:"skip-waiting" }`, активируется, удаляет старый Cache Storage, и каждая управляемая страница перезагружается по `controllerchange` ([ADR-0007](adr/0007-obnovlenie-po-knopke.md)). Управляемое приложение обслуживает same-origin GET только из текущего precache; сетевого runtime fallback нет. Старые release остаются на диске для безопасной установки ранее загруженного worker и удаляются только отдельной осознанной процедурой.
+1. Граница из OSM. Передать OSM id в формате `R123`, `W123` или `N123` через `--osm-id`; скрипт получает `Polygon`/`MultiPolygon` из Nominatim lookup. Для безымянного контура lookup вернёт пустой список - тогда геометрия берётся из Overpass и передаётся файлом через `--boundary` (принимается GeoJSON и ответ Overpass `out geom`).
+2. Район работ. Прямоугольник `--clip minLon,minLat,maxLon,maxLat` обрезает границу до нужного участка. Для замкнутого водоёма не нужен, для реки обязателен ([ADR-0008](adr/0008-paket-reki-po-rajonu.md)).
+3. bbox и тайлы. Из обрезанной границы считается `bbox`; по нему - список тайлов `z12`-`z18`.
+4. Скачивание с кэшем. Тайл сначала ищется в `.deeper-cache/{z}/{x}/{y}.mvt` в корне репозитория (файл нулевой длины - «скачан, пуст»); при промахе качается из сети (токен из `DEEPER_TOKEN`) и кладётся в кэш. Ретраи до 6 попыток с экспоненциальным бэкоффом, параллелизм не выше 3: сервер Deeper генерирует тайлы на лету и часто отвечает `504`. Полная выкачка трёх пакетов - около тысячи тайлов, часы; повторная сборка из тёплого кэша сети не требует.
+5. Конвертация. Из `z18` собираются полосы глубин (клип по bbox), со всех уровней - подписи; пишутся `bathymetry.json` и `lake.json`.
+6. Публикация immutable release. Staging одним `rename` публикуется как `lakes/<slug>/<release>`; затем immutable `lakes/registry/<release>.json` и `lakes/precache/<release>.json`; как commit marker атомарно заменяется `lakes/index.json`. Повреждённый существующий реестр останавливает сборку.
+7. Service worker. Сборщик встраивает `generatedAt` в `SW_VERSION` файла `sw.js`; precache версии включает `bathymetry.json` пакетов. Механика обновления - по кнопке ([ADR-0007](adr/0007-obnovlenie-po-knopke.md)).
 
 ### Запуск сборщика
 
-Свежий `Bearer` выдаёт сама by.fishermap.org: авторизованная сессия отвечает на `POST /api/navionics-auth` полем `tokens["access-token"]`. Значения `auth_token`, `XSRF-TOKEN`, `fishermaporg_session` и `cf_clearance` берутся из devtools вкладки с картой глубин:
+Токен берётся из devtools вкладки maps.fishdeeper.com (параметр `token` любого запроса `*.vector`); срок жизни неизвестен - при `403` взять свежий. Передавать через окружение:
 
 ```bash
-curl -s -X POST 'https://by.fishermap.org/api/navionics-auth' \
-  -H "authorization: Bearer $FISHERMAP_TOKEN" \
-  -H "x-xsrf-token: $FISHERMAP_XSRF" \
-  -H 'x-requested-with: XMLHttpRequest' \
-  -H 'origin: https://by.fishermap.org' \
-  -H 'referer: https://by.fishermap.org/depth-map/' \
-  -b "auth_token=$FISHERMAP_TOKEN; XSRF-TOKEN=$FISHERMAP_XSRF; fishermaporg_session=$FISHERMAP_SESSION; cf_clearance=$FISHERMAP_CLEARANCE" \
-  | jq -r '.tokens["access-token"]'
-```
-
-Токены передавайте через окружение, чтобы они не попали в историю команд и репозиторий:
-
-```bash
-export NAVIONICS_CONFIG='<config JWT>'
-export NAVIONICS_TOKEN='<Bearer без слова Bearer>'
+export DEEPER_TOKEN='<token>'
 
 node tools/lake-package.mjs \
   --slug naroch \
   --name Нарочь \
   --type lake \
   --osm-id R123456 \
-  --zoom 14-18 \
   --generated-at 2026-08-06T12:00:00.000Z \
   --output lakes
 ```
 
-Для готовой границы замените `--osm-id R123456` на `--boundary path/to/boundary.geojson`. Повторный запуск возобновляет загрузку: нужные валидные PNG копируются из активного release в чистый staging без повторного скачивания. Новый `generatedAt` создаёт новый immutable release; прежние release и их precache manifest сохраняются для уже открытых клиентов. Передавайте одинаковый `--generated-at` для побайтово воспроизводимых JSON и `sw.js`; без параметра скрипт использует текущее время. По умолчанию обновляется `sw.js` рядом с каталогом `lakes`; другой путь задаётся через `--service-worker`.
-
-Границу безымянного контура берите из Overpass и сохраняйте в файл; ответ `out geom` передаётся в `--boundary` как есть:
-
-```bash
-curl -s https://overpass-api.de/api/interpreter \
-  --data-urlencode 'data=[out:json];rel(18103281);(._;>>;);out geom;' > /tmp/gornovo.overpass.json
-```
-
-#### Река
-
-У реки берётся отношение водной поверхности (`natural=water`), а участок задаётся `--clip`. Найти отношение по точке на берегу:
-
-```bash
-curl -s https://overpass-api.de/api/interpreter \
-  --data-urlencode 'data=[out:json];rel(around:1500,52.0879,26.133923)[natural=water];out tags;'
-
-curl -s https://overpass-api.de/api/interpreter \
-  --data-urlencode 'data=[out:json];rel(7791508);out geom;' > /tmp/pripyat.overpass.json
-```
-
-```bash
-node tools/lake-package.mjs \
-  --slug pripyat-pinsk \
-  --name 'Припять у Пинска' \
-  --type river \
-  --boundary /tmp/pripyat.overpass.json \
-  --clip 26.111993,52.074425,26.155853,52.101375 \
-  --zoom 14-18 \
-  --output lakes
-```
-
-Прямоугольник задавайте в порядке `bbox`: `minLon,minLat,maxLon,maxLat`. Радиус около 1 км от точки лова - 396 тайлов на `z18` и 569 на всю пирамиду `z14-z18`; всё русло из OSM без обрезки дало бы порядка 9500 только на `z18`. `--zoom` без диапазона собирает один уровень: масштаб на карте будет зафиксирован ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md)).
+Для готовой границы замените `--osm-id` на `--boundary path/to/boundary.geojson`; для реки добавьте `--clip minLon,minLat,maxLon,maxLat`. Повторный запуск использует `.deeper-cache` и не качает уже скачанное. Новый `generatedAt` создаёт новый immutable release; передавайте одинаковый `--generated-at` для побайтово воспроизводимых JSON и `sw.js`.
 
 ### Обновление оболочки без пересборки пакетов
 
-Первым аргументом скрипт принимает команду: `build` (по умолчанию) собирает пакет водоёма, `restamp` только перевыпускает версию оболочки. `restamp` нужен после любого изменения `index.html`, `app-core.js`, `sw.js`, `manifest.webmanifest`, `icons/` или `vendor/`: без нового `SW_VERSION` установленный service worker продолжит отдавать старую копию из своего cache.
+`restamp` перевыпускает версию оболочки без пересборки пакетов - нужен после любого изменения `index.html`, `app-core.js`, `sw.js`, `manifest.webmanifest`, `icons/` или `vendor/`:
 
 ```bash
 node tools/lake-package.mjs restamp
 ```
 
-Команда читает текущий `lakes/index.json`, проверяет, что каталоги активных release на месте, и публикует новые `lakes/registry/<release>.json` и `lakes/precache/<release>.json` с прежними пакетами внутри, затем переключает `lakes/index.json` и встраивает новый `generatedAt` в `SW_VERSION`. Тайлы не скачиваются, каталоги `lakes/<slug>/<release>` не меняются. Поддерживаются те же `--generated-at`, `--output` и `--service-worker`. Пустой реестр и отсутствующий каталог активного пакета прерывают команду до записи `sw.js`.
-
-### Достройка пирамиды без токена
-
-Команда `pyramid` достраивает нижние уровни зума уже опубликованному пакету даунсемплом собственных тайлов: каждый тайл уровня `z-1` собирается усреднением 2x2 пикселей четырёх дочерних тайлов уровня `z`. Сеть и токен Navionics не нужны. Это способ починить пакет, собранный одним уровнем (`--zoom 18` без диапазона): без нижних уровней слой тайлов скрыт на обзорном масштабе ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md)).
-
-```bash
-node tools/lake-package.mjs pyramid --slug gornovo,gorodishchenskoe,pripyat-pinsk --min-zoom 14
-```
-
-`--slug` принимает список через запятую: все пакеты перевыпускаются одним release с общим `generatedAt`, поэтому реестр, precache и `SW_VERSION` обновляются один раз. Верхние уровни копируются в новый release без изменений, `minZoom` манифеста опускается до `--min-zoom`. Подписи глубин при уменьшении становятся нечитаемыми - это ожидаемо, на обзоре важна заливка по глубине; при следующей полной пересборке с токеном нижние уровни лучше скачать родные (`--zoom 14-18`).
+Команда читает текущий `lakes/index.json`, проверяет каталоги активных release, публикует новые registry/precache и встраивает новый `generatedAt` в `SW_VERSION`. Поддерживаются `--generated-at`, `--output`, `--service-worker`.
 
 ## Ограничения и оговорки
 
-- Токен и лицензия. Bearer принадлежит подписке by.fishermap.org, не нам. Пакеты публикуются вместе с сайтом ([ADR-0005](adr/0005-publikaciya-paketov-vodoemov.md)); это перераспространение тайлов Navionics, риск ToS и копирайта принят осознанно.
-- Максимальный зум. Потолок тарифа `standard_tier` - `z18` (`z19` отвечает `403`). Строить на `z18`: это самый тонкий родной зум (~0.37 м/px на широте 52°). При смене тарифа перепроверить свежим токеном.
-- Покрытие SonarChart. Данных Navionics нет на многих малых водоёмах: там весь `bbox` отдаёт одинаковый пустой прозрачный PNG (334 байта). Проверяйте центральный тайл до сборки; пустое покрытие - не ошибка сборщика. Пакет с пустой батиметрией всё равно нужен: он включает экран «Карта водоёма» с границей OSM и собственными промерами. Так собрано `gornovo`.
-- Река. Пакет собирается только по району работ через `--clip`; весь bbox тайлов скачивается прямоугольником, поэтому у сильно изогнутого участка часть тайлов уходит на сушу ([ADR-0008](adr/0008-paket-reki-po-rajonu.md)).
+- Токен и лицензия. `token` принадлежит сессии maps.fishdeeper.com. Публикация пакетов - перераспространение данных Deeper; риск ToS принят осознанно, как ранее для Navionics ([ADR-0005](adr/0005-publikaciya-paketov-vodoemov.md), [ADR-0010](adr/0010-batimetriya-deeper-vektorom-v-pakete.md)).
+- Покрытие. Deeper - краудсорс: данные есть только там, где кто-то плавал с эхолотом Deeper; внутри тайла с данными промерена может быть лишь полоса трека. Пустое покрытие - не ошибка: пакет собирается с границей OSM и пустой батиметрией, экран карты работает с собственными промерами.
+- Максимальный зум источника - `z18` (`z19` отвечает 404). Проверено 2026-08-11.
 - Атрибуция. Показывать `attribution` на карте (требование источников).
-- Сравнение глубин. Приложение мерит «счёт» (эхо-отсчёт), Navionics - метры; наложение сравнивает прежде всего пространственно (где бровка/яма относительно изобат), а не численно.
+- Сравнение глубин. Приложение мерит «счёт» (эхо-отсчёт), Deeper - метры; наложение сравнивает прежде всего пространственно (где бровка/яма относительно полос), а не численно.
+
+## Наследие: растровый пакет (только чтение)
+
+Старый формат: `lake.json` без `format`/`bathymetry`, с `crs: "EPSG:3857"`, `tileSize: 256`, `du` и каталогом `tiles/<z>/<x>/<y>.png` (Web Mercator XYZ). Приложение рисует его через `L.tileLayer` с `minNativeZoom`/`maxNativeZoom` из манифеста и не даёт уменьшить масштаб ниже `minZoom` ([ADR-0009](adr/0009-piramida-zumov-v-pakete.md)). Так работает `demo-lake` и любые ранее опубликованные release. Новые растровые пакеты не собираются: Navionics-загрузчик и команда `pyramid` удалены из сборщика.

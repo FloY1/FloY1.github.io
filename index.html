@@ -270,6 +270,11 @@ input[type=file]{display:none}
   z-index:35;box-shadow:0 8px 22px rgba(2,10,14,.5);white-space:nowrap;
 }
 #updateBtn[hidden]{display:none}
+.depth-label{
+  font-family:var(--font-num);font-size:11px;color:rgba(255,255,255,.6);
+  text-shadow:-1px -1px 1px #000, 1px -1px 1px #000, -1px 1px 1px #000, 1px 1px 1px #000;
+  white-space:nowrap;display:grid;place-items:center;line-height:1;margin-left:-12px;margin-top:-6px;
+}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 </style>
 </head>
@@ -1462,24 +1467,64 @@ async function afterWaterMap(waterbody){
     const bounds = L.latLngBounds([minLat,minLon], [maxLat,maxLon]);
     const nativeMin = manifest.minZoom;
     const nativeZoom = manifest.maxZoom;
+    const isVector = manifest.format === 2 && manifest.bathymetry;
     const map = L.map("watermap", {
-      minZoom:Math.max(0, nativeMin - 4),
-      maxZoom:nativeZoom + 3,
+      minZoom: isVector ? nativeMin : Math.max(0, nativeMin - 4),
+      maxZoom: isVector ? nativeZoom : nativeZoom + 3,
       maxBounds:bounds.pad(0.75),
       maxBoundsViscosity:0.7
     });
     viewCleanup = () => map.remove();
-    L.tileLayer(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/tiles/{z}/{x}/{y}.png`, {
-      minNativeZoom:nativeMin,
-      maxNativeZoom:nativeZoom,
-      minZoom:nativeMin,
-      maxZoom:nativeZoom + 3,
-      tileSize:manifest.tileSize,
-      bounds,
-      noWrap:true,
-      keepBuffer:2,
-      attribution:manifest.attribution || ""
-    }).addTo(map);
+    if (isVector) {
+      const bathyRes = await fetch(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/${encodeURIComponent(manifest.bathymetry)}`);
+      if (!bathyRes.ok) throw new Error("Vector bathymetry missing");
+      const bathymetry = await bathyRes.json();
+      map.fitBounds(bounds, { padding:[12,12] });
+      
+      const bandRenderer = L.canvas();
+      bathymetry.bands.forEach(band => {
+        const color = AppCore.depthColor(band.depth, bathymetry.depthMax);
+        L.geoJSON({ type: "MultiPolygon", coordinates: band.polygons }, {
+          style: {
+            fillColor: color,
+            fillOpacity: 1,
+            color,
+            weight: 1,
+            opacity: 1
+          },
+          renderer: bandRenderer
+        }).addTo(map);
+      });
+
+      const labelsLayer = L.layerGroup().addTo(map);
+      const updateLabels = () => {
+        labelsLayer.clearLayers();
+        const z = AppCore.labelZoom(map.getZoom());
+        const pts = bathymetry.labels[String(z)] || [];
+        const view = map.getBounds().pad(0.2);
+        pts.forEach(pt => {
+          if (!view.contains([pt[1], pt[0]])) return;
+          const icon = L.divIcon({ className: "depth-label", html: esc(pt[2]), iconSize: [24, 12] });
+          L.marker([pt[1], pt[0]], { icon, interactive: false }).addTo(labelsLayer);
+        });
+      };
+      map.on("zoomend moveend", updateLabels);
+      updateLabels();
+      
+      if (manifest.attribution) map.attributionControl.addAttribution(manifest.attribution);
+    } else {
+      L.tileLayer(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/tiles/{z}/{x}/{y}.png`, {
+        minNativeZoom:nativeMin,
+        maxNativeZoom:nativeZoom,
+        minZoom:nativeMin,
+        maxZoom:nativeZoom + 3,
+        tileSize:manifest.tileSize,
+        bounds,
+        noWrap:true,
+        keepBuffer:2,
+        attribution:manifest.attribution || ""
+      }).addTo(map);
+    }
     const boundaryLayer = L.geoJSON({ type:"Feature", properties:{}, geometry:manifest.boundary }, {
       style:{ color:"#4FD1C5", weight:2, opacity:0.9, fill:false }
     }).addTo(map);

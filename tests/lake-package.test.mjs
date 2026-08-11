@@ -3,25 +3,30 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import {
   bboxFromGeometry,
   tilesForBbox,
-  zoomRange,
+  computeMinZoom,
   clipGeometryToBbox,
   polygonFromOverpass,
   fetchOsmBoundary,
+  parseVectorTile,
+  tilePixelToLonLat,
+  assembleBathymetry,
   buildLakePackage,
-  extendLakePyramid,
-  restampShell,
-  encodeRgbaPng,
-  decodeRgbaPng
+  buildLakePackageBatch,
+  restampShell
 } from "../tools/lake-package.mjs";
 
 const PNG_1X1 = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+XqG6WQAAAABJRU5ErkJggg==",
   "base64"
 );
+
+const FIXTURE = fileURLToPath(new URL("./fixtures/deeper-17-75082-43240.mvt", import.meta.url));
+const FIXTURE_TILE = { z:17, x:75082, y:43240 };
 
 const boundary = {
   type:"Polygon",
@@ -41,12 +46,14 @@ test("tilesForBbox возвращает покрытие XYZ без пропус
   ]);
 });
 
-test("zoomRange принимает один уровень и диапазон пирамиды", () => {
-  assert.deepEqual(zoomRange(18), [18, 18]);
-  assert.deepEqual(zoomRange("14-18"), [14, 18]);
-  assert.throws(() => zoomRange("18-14"), /low to high/);
-  assert.throws(() => zoomRange("18-23"), /from 0 to 22/);
-  assert.throws(() => zoomRange("z18"), /N or N-M/);
+test("computeMinZoom берёт наибольший влезающий зум минус 1 с clamp 3..15", () => {
+  // Крошечный bbox влезает почти на любом зуме -> упирается в верхний clamp 15.
+  assert.equal(computeMinZoom([26.2188,52.093,26.2189,52.0931]), 15);
+  // Гигантский bbox влезает только на малых зумах.
+  assert.equal(computeMinZoom([-10,-10,10,10]), 4);
+  // Реальные боевые bbox.
+  assert.equal(computeMinZoom([26.2115684,52.0826384,26.2248185,52.0927852]), 14);
+  assert.equal(computeMinZoom([26.121524756036496,52.078917,26.146017331556376,52.096883]), 13);
 });
 
 test("clipGeometryToBbox обрезает открытую геометрию реки до района работ", () => {
@@ -133,120 +140,248 @@ test("fetchOsmBoundary получает Polygon по OSM relation id", async t =
   });
 });
 
-test("buildLakePackage скачивает PNG с авторизацией и создаёт воспроизводимый пакет", async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "lake-package-"));
-  t.after(() => rm(root, { recursive:true, force:true }));
-  const requests = [];
-  const server = http.createServer((request, response) => {
-    requests.push({ url:request.url, authorization:request.headers.authorization, origin:request.headers.origin });
-    response.writeHead(200, { "content-type":"image/png" });
-    response.end(PNG_1X1);
+test("parseVectorTile разбирает реальный тайл Deeper без зависимостей", async () => {
+  const layers = parseVectorTile(await readFile(FIXTURE));
+
+  assert.deepEqual(layers.map(layer => layer.name).sort(), ["depth", "depth_labels"]);
+  const depth = layers.find(layer => layer.name === "depth");
+  const labels = layers.find(layer => layer.name === "depth_labels");
+  assert.equal(depth.extent, 4096);
+  assert.equal(depth.features.length, 10);
+  assert.equal(labels.features.length, 27);
+  // Слой depth: полигоны (geom type 3), полосы 0..300 см с шагом 33.
+  assert.ok(depth.features.every(feature => feature.type === 3));
+  assert.deepEqual(depth.features.map(feature => feature.properties.depth),
+    [0, 33, 66, 100, 133, 166, 200, 233, 266, 300]);
+  // Слой depth_labels: точки (geom type 1) с готовой подписью dl_m в метрах.
+  assert.ok(labels.features.every(feature => feature.type === 1));
+  assert.equal(typeof labels.features[0].properties.dl_m, "string");
+});
+
+test("tilePixelToLonLat переводит пиксель тайла в WGS84", () => {
+  const [lon, lat] = tilePixelToLonLat(FIXTURE_TILE, 0, 0, 4096);
+  assert.equal(lon, 26.2188720703125);
+  assert.ok(Math.abs(lat - 52.09300763963823) < 1e-9, `lat=${lat}`);
+});
+
+test("assembleBathymetry собирает полосы и подписи из тайла Deeper", async () => {
+  const buffer = await readFile(FIXTURE);
+  const bbox = [26.20, 52.08, 26.24, 52.10];
+  // Фикстура - z17; геометрию собираем с неё, задав geometryZoom.
+  const bathymetry = assembleBathymetry([{ ...FIXTURE_TILE, buffer }], bbox, { geometryZoom:17 });
+
+  assert.equal(bathymetry.depthUnit, "cm");
+  assert.equal(bathymetry.depthStep, 33);
+  assert.equal(bathymetry.depthMax, 333);
+  assert.deepEqual(bathymetry.bands.map(band => band.depth),
+    [0, 33, 66, 100, 133, 166, 200, 233, 266, 300]);
+  assert.deepEqual(bathymetry.bands[0].depthMax, 33);
+  // Полосы - MultiPolygon: массив полигонов, полигон = массив колец, кольцо = [lon,lat].
+  const ring = bathymetry.bands[0].polygons[0][0];
+  assert.ok(Array.isArray(ring) && ring.length >= 4);
+  assert.deepEqual(ring[0], ring.at(-1), "кольцо замкнуто");
+  ring.forEach(([lon, lat]) => {
+    assert.equal(lon, Math.round(lon * 1e7) / 1e7, "lon округлён до 7 знаков");
+    assert.equal(lat, Math.round(lat * 1e7) / 1e7, "lat округлён до 7 знаков");
+    assert.ok(lon >= bbox[0] - 1e-9 && lon <= bbox[2] + 1e-9, "клип по bbox: lon");
+    assert.ok(lat >= bbox[1] - 1e-9 && lat <= bbox[3] + 1e-9, "клип по bbox: lat");
   });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-  const port = server.address().port;
+  // Полосы не выходят за геопрямоугольник СОБСТВЕННОГО экстента тайла: буферная
+  // зона (px/py вне 0..4096) обрезана до перевода в WGS84.
+  const [rLonMin, rLatMax] = tilePixelToLonLat(FIXTURE_TILE, 0, 0, 4096);
+  const [rLonMax, rLatMin] = tilePixelToLonLat(FIXTURE_TILE, 4096, 4096, 4096);
+  for (const band of bathymetry.bands){
+    for (const polygon of band.polygons){
+      for (const ringOfPoly of polygon){
+        for (const [lon, lat] of ringOfPoly){
+          assert.ok(lon >= rLonMin - 1e-6 && lon <= rLonMax + 1e-6, `lon ${lon} вне экстента тайла`);
+          assert.ok(lat >= rLatMin - 1e-6 && lat <= rLatMax + 1e-6, `lat ${lat} вне экстента тайла`);
+        }
+      }
+    }
+  }
+  // Подписи ключуются зумом источника; точки в буфере (напр. dl_m "2.3" при px=-36)
+  // отброшены как принадлежащие соседнему тайлу; остаётся 21 уникальная в экстенте.
+  assert.deepEqual(Object.keys(bathymetry.labels), ["17"]);
+  assert.equal(bathymetry.labels["17"].length, 21);
+  bathymetry.labels["17"].forEach(([lon, lat, text]) => {
+    assert.equal(typeof lon, "number");
+    assert.equal(typeof lat, "number");
+    assert.equal(typeof text, "string");
+    assert.ok(lon >= rLonMin - 1e-6 && lon <= rLonMax + 1e-6, `подпись lon ${lon} в буфере`);
+    assert.ok(lat >= rLatMin - 1e-6 && lat <= rLatMax + 1e-6, `подпись lat ${lat} в буфере`);
+  });
+});
+
+test("assembleBathymetry клипует полосы по узкому bbox", async () => {
+  const buffer = await readFile(FIXTURE);
+  const wide = assembleBathymetry([{ ...FIXTURE_TILE, buffer }], [26.20, 52.08, 26.24, 52.10], { geometryZoom:17 });
+  // Узкий прямоугольник в центре тайла отрезает часть полос.
+  const narrow = assembleBathymetry([{ ...FIXTURE_TILE, buffer }], [26.219, 52.091, 26.221, 52.093], { geometryZoom:17 });
+  const wideRings = wide.bands.reduce((sum, band) => sum + band.polygons.length, 0);
+  const narrowRings = narrow.bands.reduce((sum, band) => sum + band.polygons.length, 0);
+  assert.ok(narrowRings < wideRings, `narrow=${narrowRings} wide=${wideRings}`);
+  for (const band of narrow.bands){
+    for (const polygon of band.polygons){
+      for (const [lon, lat] of polygon[0]){
+        assert.ok(lon >= 26.219 - 1e-9 && lon <= 26.221 + 1e-9);
+        assert.ok(lat >= 52.091 - 1e-9 && lat <= 52.093 + 1e-9);
+      }
+    }
+  }
+});
+
+test("buildLakePackage собирает векторный пакет из кэша и не ходит в сеть", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-vector-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const cacheDir = path.join(root, ".deeper-cache");
+  const fixture = await readFile(FIXTURE);
+
+  // Узкий bbox вокруг тайла фикстуры -> по одному тайлу на уровень z12..z18.
+  const packBoundary = {
+    type:"Polygon",
+    coordinates:[[[26.2188,52.0929],[26.2190,52.0929],[26.2190,52.0931],[26.2188,52.0931],[26.2188,52.0929]]]
+  };
+  const bbox = bboxFromGeometry(packBoundary);
+  const tiles = [];
+  for (let z = 12; z <= 18; z++) tiles.push(...tilesForBbox(bbox, z));
+  // Полный тёплый кэш: z18 - настоящий тайл, остальные уровни - пустые (0 байт).
+  for (const tile of tiles){
+    const file = path.join(cacheDir, String(tile.z), String(tile.x), `${tile.y}.mvt`);
+    await mkdir(path.dirname(file), { recursive:true });
+    await writeFile(file, tile.z === 18 ? fixture : Buffer.alloc(0));
+  }
 
   const serviceWorkerPath = path.join(root, "sw.js");
   await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
+
+  let networkCalls = 0;
+  const fetchImpl = () => { networkCalls++; throw new Error("network must not be touched with a full cache"); };
+
   const options = {
-    slug:"demo-lake",
-    name:"Демо-озеро",
+    slug:"test",
+    name:"Тест",
     type:"lake",
-    boundary,
-    zoom:0,
-    config:"dev-config",
-    token:"dev-token",
+    boundary:packBoundary,
     outputRoot:path.join(root, "lakes"),
-    endpoint:`http://127.0.0.1:${port}/tile/{z}/{x}/{y}`,
-    generatedAt:"2026-08-06T00:00:00.000Z",
-    serviceWorkerPath,
+    cacheDir,
+    token:"",
+    fetchImpl,
+    generatedAt:"2026-08-11T00:00:00.000Z",
+    serviceWorkerPath
   };
-  const firstRelease = "2026-08-06T00-00-00-000Z";
-  const firstPackage = path.join(root, "lakes/demo-lake", firstRelease);
   const result = await buildLakePackage(options);
+  const release = "2026-08-11T00-00-00-000Z";
 
-  assert.equal(result.tileCount, 1);
-  assert.deepEqual(requests, [{
-    url:"/tile/0/0/0?config=dev-config&transparent=true&du=1&layer=1",
-    authorization:"Bearer dev-token",
-    origin:"https://by.fishermap.org"
-  }]);
-  assert.deepEqual(await readFile(path.join(firstPackage, "tiles/0/0/0.png")), PNG_1X1);
-  const manifestText = await readFile(path.join(firstPackage, "lake.json"), "utf8");
-  const manifest = JSON.parse(manifestText);
-  assert.equal(manifest.release, firstRelease);
-  assert.deepEqual(manifest.bbox, [-1,-1,1,1]);
-  assert.deepEqual(manifest.center, [0,0]);
-  assert.equal(manifest.minZoom, 0);
-  assert.equal(manifest.maxZoom, 0);
-  const registryPath = path.join(root, "lakes/index.json");
-  const registryText = await readFile(registryPath, "utf8");
-  const registrySnapshotPath = path.join(root, "lakes/registry", `${firstRelease}.json`);
-  assert.equal(await readFile(registrySnapshotPath, "utf8"), registryText);
-  const registry = JSON.parse(registryText);
-  assert.deepEqual(registry.waterbodies.map(item => ({ slug:item.slug, release:item.release })), [
-    { slug:"demo-lake", release:firstRelease }
-  ]);
-  const precachePath = path.join(root, "lakes/precache", `${firstRelease}.json`);
-  const precacheText = await readFile(precachePath, "utf8");
-  const precache = JSON.parse(precacheText);
-  assert.deepEqual(precache.files, [
-    `lakes/demo-lake/${firstRelease}/lake.json`,
-    `lakes/demo-lake/${firstRelease}/tiles/0/0/0.png`,
-    `lakes/precache/${firstRelease}.json`,
-    `lakes/registry/${firstRelease}.json`
-  ]);
-  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-06T00:00:00.000Z";/);
+  assert.equal(networkCalls, 0, "с полным кэшем и пустым токеном сеть не трогается");
+  assert.equal(result.downloaded, 0);
+  assert.equal(result.tileCount, tiles.length);
 
+  const packageDir = path.join(root, "lakes/test", release);
+  const manifest = JSON.parse(await readFile(path.join(packageDir, "lake.json"), "utf8"));
+  assert.equal(manifest.format, 2);
+  assert.equal(manifest.bathymetry, "bathymetry.json");
+  assert.equal(manifest.maxZoom, 22);
+  assert.equal(manifest.minZoom, computeMinZoom(bbox));
+  assert.equal(manifest.source, "Deeper fishdeeper.com (vector z18)");
+  assert.deepEqual(manifest.bbox, bbox);
+
+  const bathymetry = JSON.parse(await readFile(path.join(packageDir, "bathymetry.json"), "utf8"));
+  assert.equal(bathymetry.depthStep, 33);
+  assert.ok(bathymetry.bands.length > 0, "z18 фикстура дала полосы");
+  assert.ok(Object.keys(bathymetry.labels).length > 0, "подписи есть хотя бы на одном уровне");
+
+  // Precache версии обязан включать bathymetry.json.
+  const precache = JSON.parse(await readFile(path.join(root, "lakes/precache", `${release}.json`), "utf8"));
+  assert.ok(precache.files.includes(`lakes/test/${release}/bathymetry.json`));
+  assert.ok(precache.files.includes(`lakes/test/${release}/lake.json`));
+  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-11T00:00:00.000Z";/);
+
+  // Повторная сборка тем же generatedAt воспроизводима и снова без сети.
   const repeated = await buildLakePackage(options);
+  assert.equal(networkCalls, 0);
   assert.equal(repeated.downloaded, 0);
-  assert.equal(requests.length, 1);
-  assert.equal(await readFile(path.join(firstPackage, "lake.json"), "utf8"), manifestText);
-  assert.equal(await readFile(registryPath, "utf8"), registryText);
-  assert.equal(await readFile(precachePath, "utf8"), precacheText);
-  const normalizedTimestamp = await buildLakePackage({ ...options, generatedAt:"2026-08-06T00:00:00Z" });
-  assert.equal(normalizedTimestamp.manifest.generatedAt, "2026-08-06T00:00:00.000Z");
-  assert.equal(normalizedTimestamp.downloaded, 0);
-  assert.equal(requests.length, 1);
 
-  const staleTile = path.join(firstPackage, "tiles/15/1/1.png");
-  await mkdir(path.dirname(staleTile), { recursive:true });
-  await writeFile(staleTile, PNG_1X1);
-  const updatedOptions = { ...options, generatedAt:"2026-08-06T00:01:00.000Z" };
-  const updated = await buildLakePackage(updatedOptions);
-  const secondRelease = "2026-08-06T00-01-00-000Z";
-  assert.equal(updated.downloaded, 0);
-  assert.equal(requests.length, 1);
-  assert.deepEqual(
-    await readFile(path.join(root, "lakes/demo-lake", secondRelease, "tiles/0/0/0.png")),
-    PNG_1X1
-  );
-  assert.deepEqual(await readFile(staleTile), PNG_1X1);
-  await assert.rejects(
-    readFile(path.join(root, "lakes/demo-lake", secondRelease, "tiles/15/1/1.png")),
-    error => error.code === "ENOENT"
-  );
-  const updatedRegistryText = await readFile(registryPath, "utf8");
-  const updatedRegistry = JSON.parse(updatedRegistryText);
-  assert.equal(updatedRegistry.waterbodies[0].release, secondRelease);
-  assert.equal(
-    await readFile(path.join(root, "lakes/registry", `${secondRelease}.json`), "utf8"),
-    updatedRegistryText
-  );
-  const updatedPrecachePath = path.join(root, "lakes/precache", `${secondRelease}.json`);
-  const updatedPrecache = JSON.parse(await readFile(updatedPrecachePath, "utf8"));
-  assert.deepEqual(updatedPrecache.files, [
-    `lakes/demo-lake/${secondRelease}/lake.json`,
-    `lakes/demo-lake/${secondRelease}/tiles/0/0/0.png`,
-    `lakes/precache/${secondRelease}.json`,
-    `lakes/registry/${secondRelease}.json`
-  ]);
-  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-06T00:01:00.000Z";/);
+  await assert.rejects(() => buildLakePackage({ ...options, concurrency:4 }), /Concurrency must be an integer/);
+});
 
-  await assert.rejects(() => buildLakePackage({ ...updatedOptions, concurrency:0 }), /Concurrency must be an integer/);
-  await writeFile(registryPath, "{");
-  await assert.rejects(() => buildLakePackage(updatedOptions), SyntaxError);
-  assert.equal(await readFile(registryPath, "utf8"), "{");
+test("buildLakePackage требует токен при промахе кэша", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-miss-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const serviceWorkerPath = path.join(root, "sw.js");
+  await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
+
+  await assert.rejects(() => buildLakePackage({
+    slug:"test",
+    name:"Тест",
+    type:"lake",
+    boundary:{ type:"Polygon", coordinates:[[[26.2188,52.0929],[26.2190,52.0929],[26.2190,52.0931],[26.2188,52.0931],[26.2188,52.0929]]] },
+    outputRoot:path.join(root, "lakes"),
+    cacheDir:path.join(root, ".empty-cache"),
+    token:"",
+    fetchImpl:() => { throw new Error("should not fetch without token"); },
+    generatedAt:"2026-08-11T00:00:00.000Z",
+    serviceWorkerPath
+  }), /missing from the cache and DEEPER_TOKEN is empty/);
+});
+
+test("loadTile качает сеть при промахе, кладёт в кэш и ретраит 504", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-net-"));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const cacheDir = path.join(root, ".deeper-cache");
+  const fixture = await readFile(FIXTURE);
+
+  // Один тайл (z12) отсутствует в кэше и должен быть скачан; сервер отвечает 504, потом 200.
+  const packBoundary = {
+    type:"Polygon",
+    coordinates:[[[26.2188,52.0929],[26.2190,52.0929],[26.2190,52.0931],[26.2188,52.0931],[26.2188,52.0929]]]
+  };
+  const bbox = bboxFromGeometry(packBoundary);
+  const tiles = [];
+  for (let z = 12; z <= 18; z++) tiles.push(...tilesForBbox(bbox, z));
+  const miss = tiles.find(tile => tile.z === 12);
+  for (const tile of tiles){
+    if (tile.z === 12) continue;
+    const file = path.join(cacheDir, String(tile.z), String(tile.x), `${tile.y}.mvt`);
+    await mkdir(path.dirname(file), { recursive:true });
+    await writeFile(file, tile.z === 18 ? fixture : Buffer.alloc(0));
+  }
+
+  const seen = [];
+  let attempts = 0;
+  const fetchImpl = async url => {
+    seen.push(url.toString());
+    attempts++;
+    if (attempts === 1) return { status:504, arrayBuffer:async () => new ArrayBuffer(0) };
+    return { status:200, arrayBuffer:async () => Buffer.alloc(0).buffer };
+  };
+  const delays = [];
+
+  const serviceWorkerPath = path.join(root, "sw.js");
+  await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
+  const result = await buildLakePackage({
+    slug:"test",
+    name:"Тест",
+    type:"lake",
+    boundary:packBoundary,
+    outputRoot:path.join(root, "lakes"),
+    cacheDir,
+    token:"live-token",
+    fetchImpl,
+    sleep:ms => { delays.push(ms); return Promise.resolve(); },
+    backoff:2000,
+    generatedAt:"2026-08-11T00:00:00.000Z",
+    serviceWorkerPath
+  });
+
+  assert.equal(result.downloaded, 1, "скачан ровно один промахнувшийся тайл");
+  assert.equal(attempts, 2, "504 вызвал ретрай, затем успех");
+  assert.deepEqual(delays, [2000], "экспоненциальный бэкофф от 2с");
+  assert.match(seen[0], /token=live-token/);
+  assert.match(seen[0], /cid=00000000-0000-0000-0000-000000000000/);
+  // Скачанный (пустой) тайл записан в кэш.
+  const cached = await readFile(path.join(cacheDir, String(miss.z), String(miss.x), `${miss.y}.mvt`));
+  assert.equal(cached.length, 0);
 });
 
 test("restampShell выпускает новую версию оболочки, не трогая пакеты", async t => {
@@ -301,118 +436,74 @@ test("restampShell выпускает новую версию оболочки, 
   );
 });
 
-test("buildLakePackage скачивает все уровни пирамиды зумов", async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "lake-pyramid-"));
+test("buildLakePackageBatch выпускает несколько пакетов одним release", async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "lake-batch-"));
   t.after(() => rm(root, { recursive:true, force:true }));
-  const server = http.createServer((request, response) => {
-    response.writeHead(200, { "content-type":"image/png" });
-    response.end(PNG_1X1);
-  });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
-  const serviceWorkerPath = path.join(root, "sw.js");
-  await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
+  const cacheDir = path.join(root, ".deeper-cache");
+  const fixture = await readFile(FIXTURE);
 
-  const result = await buildLakePackage({
-    slug:"demo-lake",
-    name:"Демо-озеро",
-    type:"lake",
-    boundary,
-    zoom:"0-2",
-    config:"dev-config",
-    token:"dev-token",
-    outputRoot:path.join(root, "lakes"),
-    endpoint:`http://127.0.0.1:${server.address().port}/tile/{z}/{x}/{y}`,
-    generatedAt:"2026-08-06T00:00:00.000Z",
-    serviceWorkerPath
-  });
-
-  assert.equal(result.manifest.minZoom, 0);
-  assert.equal(result.manifest.maxZoom, 2);
-  assert.equal(result.tileCount, 1 + 4 + 4);
-  const packageDir = path.join(root, "lakes/demo-lake/2026-08-06T00-00-00-000Z");
-  assert.deepEqual(await readFile(path.join(packageDir, "tiles/0/0/0.png")), PNG_1X1);
-  assert.deepEqual(await readFile(path.join(packageDir, "tiles/2/1/1.png")), PNG_1X1);
-});
-
-test("extendLakePyramid достраивает нижние уровни даунсемплом верхнего", async t => {
-  const root = await mkdtemp(path.join(os.tmpdir(), "lake-downscale-"));
-  t.after(() => rm(root, { recursive:true, force:true }));
-  const solidRed = Buffer.alloc(256 * 256 * 4);
-  for (let index = 0; index < solidRed.length; index += 4){
-    solidRed[index] = 255;
-    solidRed[index + 3] = 255;
+  const packBoundary = {
+    type:"Polygon",
+    coordinates:[[[26.2188,52.0929],[26.2190,52.0929],[26.2190,52.0931],[26.2188,52.0931],[26.2188,52.0929]]]
+  };
+  const bbox = bboxFromGeometry(packBoundary);
+  const tiles = [];
+  for (let z = 12; z <= 18; z++) tiles.push(...tilesForBbox(bbox, z));
+  for (const tile of tiles){
+    const file = path.join(cacheDir, String(tile.z), String(tile.x), `${tile.y}.mvt`);
+    await mkdir(path.dirname(file), { recursive:true });
+    await writeFile(file, tile.z === 18 ? fixture : Buffer.alloc(0));
   }
-  const redTile = encodeRgbaPng(256, 256, solidRed);
-  const server = http.createServer((request, response) => {
-    response.writeHead(200, { "content-type":"image/png" });
-    response.end(redTile);
-  });
-  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
-  t.after(() => new Promise(resolve => server.close(resolve)));
+
   const serviceWorkerPath = path.join(root, "sw.js");
   await writeFile(serviceWorkerPath, '"use strict";\nconst SW_VERSION = "base";\n');
 
-  await buildLakePackage({
-    slug:"demo-lake",
-    name:"Демо-озеро",
-    type:"lake",
-    boundary,
-    zoom:2,
-    config:"dev-config",
-    token:"dev-token",
+  let networkCalls = 0;
+  const options = {
+    packages:[
+      { slug:"alpha", name:"Альфа", type:"lake", boundary:packBoundary },
+      { slug:"beta", name:"Бета", type:"reservoir", boundary:packBoundary }
+    ],
     outputRoot:path.join(root, "lakes"),
-    endpoint:`http://127.0.0.1:${server.address().port}/tile/{z}/{x}/{y}`,
-    generatedAt:"2026-08-06T00:00:00.000Z",
+    cacheDir,
+    token:"",
+    fetchImpl:() => { networkCalls++; throw new Error("network must not be touched with a full cache"); },
+    generatedAt:"2026-08-11T00:00:00.000Z",
     serviceWorkerPath
-  });
+  };
+  const batch = await buildLakePackageBatch(options);
+  const release = "2026-08-11T00-00-00-000Z";
 
-  const result = await extendLakePyramid({
-    slugs:["demo-lake"],
-    minZoom:0,
-    outputRoot:path.join(root, "lakes"),
-    generatedAt:"2026-08-06T01:00:00.000Z",
-    serviceWorkerPath
-  });
-  const release = "2026-08-06T01-00-00-000Z";
-  assert.equal(result.release, release);
-  assert.deepEqual(result.packages, [{ slug:"demo-lake", release, synthesized:5 }]);
+  assert.equal(networkCalls, 0);
+  assert.equal(batch.release, release);
+  assert.equal(batch.packages.length, 2);
 
-  const packageDir = path.join(root, "lakes/demo-lake", release);
-  const manifest = JSON.parse(await readFile(path.join(packageDir, "lake.json"), "utf8"));
-  assert.equal(manifest.minZoom, 0);
-  assert.equal(manifest.maxZoom, 2);
-  assert.equal(manifest.release, release);
-  assert.equal(manifest.generatedAt, "2026-08-06T01:00:00.000Z");
-  assert.deepEqual(await readFile(path.join(packageDir, "tiles/2/1/1.png")), redTile);
-
-  const pixelAt = (tile, x, y) => Array.from(tile.pixels.subarray((y * 256 + x) * 4, (y * 256 + x) * 4 + 4));
-  const zoomOne = decodeRgbaPng(await readFile(path.join(packageDir, "tiles/1/0/0.png")));
-  assert.deepEqual(pixelAt(zoomOne, 192, 192), [255, 0, 0, 255], "нижний правый квадрант закрашен из z2 1/1");
-  assert.deepEqual(pixelAt(zoomOne, 64, 64), [0, 0, 0, 0], "квадрант без исходного тайла прозрачен");
-  const zoomZero = decodeRgbaPng(await readFile(path.join(packageDir, "tiles/0/0/0.png")));
-  assert.deepEqual(pixelAt(zoomZero, 96, 96), [255, 0, 0, 255], "z0 собирает центр покрытия из z1");
-  assert.deepEqual(pixelAt(zoomZero, 16, 16), [0, 0, 0, 0], "края bbox на z0 прозрачны");
-
+  // Оба slug в реестре под ОДНИМ штампом release.
   const registry = JSON.parse(await readFile(path.join(root, "lakes/index.json"), "utf8"));
   assert.deepEqual(
-    registry.waterbodies.map(item => ({ slug:item.slug, release:item.release })),
-    [{ slug:"demo-lake", release }]
+    registry.waterbodies.map(item => ({ slug:item.slug, release:item.release })).sort((a, b) => a.slug.localeCompare(b.slug)),
+    [{ slug:"alpha", release }, { slug:"beta", release }]
   );
+  // Ровно один снимок registry/precache этого штампа, один SW_VERSION.
+  const registryText = await readFile(path.join(root, "lakes/index.json"), "utf8");
+  assert.equal(await readFile(path.join(root, "lakes/registry", `${release}.json`), "utf8"), registryText);
   const precache = JSON.parse(await readFile(path.join(root, "lakes/precache", `${release}.json`), "utf8"));
-  assert.ok(precache.files.includes(`lakes/demo-lake/${release}/tiles/0/0/0.png`));
-  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-06T01:00:00.000Z";/);
-  await assert.rejects(
-    readFile(path.join(root, "lakes/demo-lake/2026-08-06T00-00-00-000Z/tiles/1/0/0.png")),
-    error => error.code === "ENOENT"
-  );
+  assert.ok(precache.files.includes(`lakes/alpha/${release}/bathymetry.json`));
+  assert.ok(precache.files.includes(`lakes/beta/${release}/bathymetry.json`));
+  assert.ok(precache.files.includes(`lakes/alpha/${release}/lake.json`));
+  assert.ok(precache.files.includes(`lakes/beta/${release}/lake.json`));
+  assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-11T00:00:00.000Z";/);
+  for (const slug of ["alpha", "beta"]){
+    const manifest = JSON.parse(await readFile(path.join(root, "lakes", slug, release, "lake.json"), "utf8"));
+    assert.equal(manifest.format, 2);
+    assert.equal(manifest.release, release);
+  }
 
-  await assert.rejects(
-    () => extendLakePyramid({ slugs:["demo-lake"], minZoom:2, outputRoot:path.join(root, "lakes"), serviceWorkerPath }),
-    /already starts at z0/
-  );
-  await assert.rejects(
-    () => extendLakePyramid({ slugs:["missing"], minZoom:0, outputRoot:path.join(root, "lakes"), serviceWorkerPath }),
-    /is not published/
-  );
+  // Идемпотентность: повторный запуск с тем же штампом и контентом не падает.
+  const repeated = await buildLakePackageBatch(options);
+  assert.equal(networkCalls, 0);
+  assert.equal(repeated.release, release);
+  assert.equal(await readFile(path.join(root, "lakes/index.json"), "utf8"), registryText);
+
+  await assert.rejects(() => buildLakePackageBatch({ ...options, packages:[] }), /at least one package/);
 });

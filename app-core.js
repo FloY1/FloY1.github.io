@@ -248,12 +248,29 @@
     return result;
   }
 
+  function depthColor(cm, depthMax) {
+    if (depthMax <= 0) return "#0b2e4f";
+    const t = Math.max(0, Math.min(1, cm / depthMax));
+    const r = Math.round(127 + t * (11 - 127));
+    const g = Math.round(212 + t * (46 - 212));
+    const b = Math.round(255 + t * (79 - 255));
+    return "#" + r.toString(16).padStart(2, "0") + g.toString(16).padStart(2, "0") + b.toString(16).padStart(2, "0");
+  }
+
+  function labelZoom(zoom) {
+    return Math.max(12, Math.min(18, Math.round(zoom)));
+  }
+
   function validLakeManifest(manifest){
     if (!manifest || typeof manifest !== "object") return false;
     if (typeof manifest.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(manifest.slug)) return false;
     if (typeof manifest.release !== "string" || !/^[A-Za-z0-9-]+$/.test(manifest.release)) return false;
     if (typeof manifest.name !== "string" || !["lake", "reservoir", "river"].includes(manifest.type)) return false;
-    if (manifest.crs !== "EPSG:3857" || manifest.tileSize !== 256) return false;
+    if (manifest.format === 2) {
+      if (typeof manifest.bathymetry !== "string") return false;
+    } else {
+      if (manifest.crs !== "EPSG:3857" || manifest.tileSize !== 256) return false;
+    }
     if (!Number.isInteger(manifest.minZoom) || !Number.isInteger(manifest.maxZoom) || manifest.minZoom > manifest.maxZoom) return false;
     if (!Array.isArray(manifest.bbox) || manifest.bbox.length !== 4 || !manifest.bbox.every(finite)) return false;
     const [minLon, minLat, maxLon, maxLat] = manifest.bbox.map(Number);
@@ -272,6 +289,8 @@
     groupMeasures,
     mergeGroup,
     projectSoundings,
-    validLakeManifest
+    validLakeManifest,
+    depthColor,
+    labelZoom
   };
 });
