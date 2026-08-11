@@ -261,6 +261,31 @@
     return Math.max(12, Math.min(18, Math.round(zoom)));
   }
 
+  // Greedy pixel-grid decluttering: keep a label only if no kept label is
+  // closer than dx/dy pixels. Points come sorted by priority (first wins).
+  function declutterLabels(points, dx, dy){
+    const cellW = Math.max(1, dx), cellH = Math.max(1, dy);
+    const cells = new Map();
+    const kept = [];
+    points.forEach((point, index) => {
+      const col = Math.floor(point.x / cellW), row = Math.floor(point.y / cellH);
+      for (let dc = -1; dc <= 1; dc++){
+        for (let dr = -1; dr <= 1; dr++){
+          const bucket = cells.get((col + dc) + ":" + (row + dr));
+          if (!bucket) continue;
+          for (const other of bucket){
+            if (Math.abs(other.x - point.x) < dx && Math.abs(other.y - point.y) < dy) return;
+          }
+        }
+      }
+      const key = col + ":" + row;
+      if (!cells.has(key)) cells.set(key, []);
+      cells.get(key).push(point);
+      kept.push(index);
+    });
+    return kept;
+  }
+
   function validLakeManifest(manifest){
     if (!manifest || typeof manifest !== "object") return false;
     if (typeof manifest.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(manifest.slug)) return false;
@@ -291,6 +316,7 @@
     projectSoundings,
     validLakeManifest,
     depthColor,
-    labelZoom
+    labelZoom,
+    declutterLabels
   };
 });

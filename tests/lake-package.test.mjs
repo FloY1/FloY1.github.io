@@ -229,6 +229,13 @@ test("assembleBathymetry клипует полосы по узкому bbox", as
       }
     }
   }
+  // Подписи клипуются тем же bbox, что и полосы.
+  for (const points of Object.values(narrow.labels)){
+    for (const [lon, lat] of points){
+      assert.ok(lon >= 26.219 && lon <= 26.221, `label lon ${lon}`);
+      assert.ok(lat >= 52.091 && lat <= 52.093, `label lat ${lat}`);
+    }
+  }
 });
 
 test("buildLakePackage собирает векторный пакет из кэша и не ходит в сеть", async t => {

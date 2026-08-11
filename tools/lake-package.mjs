@@ -456,6 +456,8 @@ export function assembleBathymetry(tiles, bbox, options = {}){
           // neighbouring tile owns them, so this avoids cross-tile duplicates.
           if (point[0] < 0 || point[0] > layer.extent || point[1] < 0 || point[1] > layer.extent) continue;
           const [lon, lat] = tilePixelToLonLat(tile, point[0], point[1], layer.extent);
+          // Labels follow the same package bbox clip as depth bands.
+          if (lon < bbox[0] || lon > bbox[2] || lat < bbox[1] || lat > bbox[3]) continue;
           const roundedLon = round7(lon);
           const roundedLat = round7(lat);
           const text = feature.properties.dl_m == null ? "" : String(feature.properties.dl_m);

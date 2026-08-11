@@ -1,0 +1,15 @@
+{
+  "generatedAt": "2026-08-11T10:00:00.000Z",
+  "files": [
+    "lakes/demo-lake/2026-08-06T12-04-00-000Z/lake.json",
+    "lakes/demo-lake/2026-08-06T12-04-00-000Z/tiles/16/37142/22270.png",
+    "lakes/gornovo/2026-08-11T10-00-00-000Z/bathymetry.json",
+    "lakes/gornovo/2026-08-11T10-00-00-000Z/lake.json",
+    "lakes/gorodishchenskoe/2026-08-11T10-00-00-000Z/bathymetry.json",
+    "lakes/gorodishchenskoe/2026-08-11T10-00-00-000Z/lake.json",
+    "lakes/precache/2026-08-11T10-00-00-000Z.json",
+    "lakes/pripyat-pinsk/2026-08-11T10-00-00-000Z/bathymetry.json",
+    "lakes/pripyat-pinsk/2026-08-11T10-00-00-000Z/lake.json",
+    "lakes/registry/2026-08-11T10-00-00-000Z.json"
+  ]
+}

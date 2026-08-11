@@ -1502,8 +1502,14 @@ async function afterWaterMap(waterbody){
         const z = AppCore.labelZoom(map.getZoom());
         const pts = bathymetry.labels[String(z)] || [];
         const view = map.getBounds().pad(0.2);
+        const visible = [];
         pts.forEach(pt => {
           if (!view.contains([pt[1], pt[0]])) return;
+          const point = map.latLngToContainerPoint([pt[1], pt[0]]);
+          visible.push({ x: point.x, y: point.y, pt });
+        });
+        AppCore.declutterLabels(visible, 34, 16).forEach(index => {
+          const pt = visible[index].pt;
           const icon = L.divIcon({ className: "depth-label", html: esc(pt[2]), iconSize: [24, 12] });
           L.marker([pt[1], pt[0]], { icon, interactive: false }).addTo(labelsLayer);
         });

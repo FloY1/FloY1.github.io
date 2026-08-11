@@ -282,3 +282,21 @@ test("labelZoom округляет и ограничивает зум [12..18]",
   assert.equal(Core.labelZoom(18.1), 18);
   assert.equal(Core.labelZoom(20), 18);
 });
+
+test("declutterLabels прореживает наложения, первый побеждает", () => {
+  const points = [
+    { x: 100, y: 100 },
+    { x: 110, y: 105 },  // ближе 34x16 к первому - выкинуть
+    { x: 150, y: 100 },  // дальше по x - оставить
+    { x: 150, y: 114 },  // ближе 16 по y к предыдущему - выкинуть
+    { x: 150, y: 130 }   // дальше по y - оставить
+  ];
+  assert.deepEqual(Core.declutterLabels(points, 34, 16), [0, 2, 4]);
+});
+
+test("declutterLabels ловит соседей через границу ячейки сетки", () => {
+  // 33 и 35 лежат в разных ячейках (шаг 34), но ближе 34 px друг к другу
+  const points = [{ x: 33, y: 8 }, { x: 35, y: 8 }];
+  assert.deepEqual(Core.declutterLabels(points, 34, 16), [0]);
+  assert.deepEqual(Core.declutterLabels([], 34, 16), []);
+});
