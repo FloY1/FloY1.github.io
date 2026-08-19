@@ -9,7 +9,79 @@
   const ID_PATTERN = /^[A-Za-z0-9_-]+$/;
   const PACKAGE_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
   const DATA_IMAGE_PATTERN = /^data:image\/(?:jpeg|png|webp);base64,[a-z0-9+/]+=*$/i;
-  const DEFAULT_REEL = { size:"3000", core:36, width:15, ratio:5.2, lineD:0.25, lineL:150 };
+  // Диаметр намотки по кромке и ширина шпули по размеру катушки (ADR-0011).
+  // Кромка выведена из типовой лесоёмкости размера, а не измерена: до замера
+  // штангенциркулем это лишь заготовка.
+  const SPOOL_SIZES = {
+    "1000":[33,13], "1500":[35,13], "2000":[38,14], "2500":[41,14], "3000":[44,15],
+    "3500":[46,15], "4000":[47,16], "4500":[49,17], "5000":[52,17], "6000":[57,18],
+    "8000":[65,20], "10000":[69,22]
+  };
+  // Медианное отношение кромки к сердечнику по таблице выше. Нужно только для
+  // «своего размера», где таблица не поможет.
+  const LIP_PER_CORE = 1.24;
+  const DEFAULT_REEL = { size:"3000", lipD:44, width:15, ratio:5.2, lineD:0.25, lineL:150 };
+
+  // Старые сохранения держали диаметр сердечника и мотали леску вверх от него,
+  // из-за чего дальность занижалась. Переводим на диаметр намотки один раз.
+  function normalizeSpool(spool){
+    if (!spool || typeof spool !== "object") return spool;
+    if (!Number.isFinite(Number(spool.lipD)) || Number(spool.lipD) <= 0){
+      const bySize = SPOOL_SIZES[spool.size];
+      const core = Number(spool.core);
+      spool.lipD = bySize ? bySize[0]
+        : Number.isFinite(core) && core > 0 ? Math.round(core * LIP_PER_CORE)
+        : DEFAULT_REEL.lipD;
+    }
+    delete spool.core;
+    return spool;
+  }
+
+  /* Перевод оборотов ручки в метры.
+     Намотка разматывается ВНУТРЬ от кромки: первый сошедший виток - самый длинный,
+     дальше диаметр падает на два диаметра лески за слой. Дальность задаёт диаметр
+     намотки; сердечник и степень заполнения знать не нужно (ADR-0011).
+     lengthFromOuter и turnsFromOuter обходят одну и ту же последовательность слоёв,
+     поэтому metersToTurns и turnsToMeters строго обратны друг другу. */
+  function spoolOK(s){ return !!s && s.lipD > 0 && s.width > 0 && s.lineD > 0.01; }
+  function perLayer(s){ return Math.max(1, Math.floor(s.width / s.lineD)); }
+  function layerDiameter(k, s){ return (s.lipD - (2*k+1)*s.lineD)/1000; }
+  function ratioOf(s){ return s.ratio > 0 ? s.ratio : 1; }
+
+  function lengthFromOuter(rotorTurns, s){   // метров лески в первых rotorTurns витках от кромки
+    if (!spoolOK(s) || rotorTurns <= 0) return 0;
+    const N = perLayer(s); let rem = rotorTurns, len = 0, k = 0;
+    while (rem > 0 && k < 600){
+      const D = layerDiameter(k, s); if (D <= 0) break;
+      if (rem >= N){ len += Math.PI*D*N; rem -= N; k++; }
+      else { len += Math.PI*D*rem; rem = 0; }
+    }
+    return len;
+  }
+  function turnsFromOuter(meters, s){        // витков ротора, чтобы снять meters метров от кромки
+    if (!spoolOK(s) || meters <= 0) return 0;
+    const N = perLayer(s); let rem = meters, turns = 0, k = 0;
+    while (rem > 0 && k < 600){
+      const D = layerDiameter(k, s); if (D <= 0) break;
+      const layer = Math.PI * D * N;
+      if (rem >= layer){ turns += N; rem -= layer; k++; }
+      else { turns += rem / (Math.PI*D); rem = 0; }
+    }
+    return turns;
+  }
+  function spoolTurns(s){ return turnsFromOuter(s.lineL, s); }
+  function metersToTurns(x, s){
+    if (!spoolOK(s) || x <= 0) return 0;
+    const L = s.lineL;
+    return turnsFromOuter(x > L ? L : x, s) / ratioOf(s);
+  }
+  function turnsToMeters(t, s){
+    if (!spoolOK(s)) return 0;
+    let rt = t * ratioOf(s); if (rt <= 0) return 0;
+    const cap = spoolTurns(s); if (rt > cap) rt = cap;
+    return lengthFromOuter(rt, s);
+  }
+  function handleTurns(s){ return spoolOK(s) ? spoolTurns(s) / ratioOf(s) : 0; }
 
   function randomId(){
     return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -27,8 +99,17 @@
       if (!Array.isArray(line.measures)) line.measures = [];
       if (line.az === undefined) line.az = null;
       if (line.spool === undefined) line.spool = null;
+      if (line.spool) normalizeSpool(line.spool);
+      if (!validTarget(line.target)) line.target = null;
     });
     return place;
+  }
+
+  // Цель важнее азимута: она задана геометрией карты, а не компасом (ADR-0012).
+  function validTarget(target){
+    return !!target && typeof target === "object" &&
+      Number.isFinite(Number(target.lat)) && Number.isFinite(Number(target.lon)) &&
+      Math.abs(Number(target.lat)) <= 90 && Math.abs(Number(target.lon)) <= 180;
   }
 
   function normalizeWaterbody(waterbody, makeId){
@@ -63,7 +144,9 @@
       .map(item => normalizeWaterbody(item, makeId));
     if (!db.reel || typeof db.reel !== "object") db.reel = { ...DEFAULT_REEL };
     if (!(Number(db.reel.ratio) > 0)) db.reel.ratio = 5.2;
+    normalizeSpool(db.reel);
     if (!Array.isArray(db.presets)) db.presets = [];
+    db.presets.forEach(preset => { if (preset && preset.data) normalizeSpool(preset.data); });
     if (typeof db.chartMeters !== "boolean") db.chartMeters = false;
     return db;
   }
@@ -155,8 +238,11 @@
 
   function validImport(data){
     const id = value => typeof value === "string" && ID_PATTERN.test(value);
+    // Принимаем оба формата: старые выгрузки несут сердечник, новые - диаметр
+    // намотки. Перевод делает normalizeSpool уже после проверки.
     const reel = spool => spool && typeof spool === "object" &&
-      ["core", "width", "lineD", "lineL"].every(key => finite(spool[key])) &&
+      ["width", "lineD", "lineL"].every(key => finite(spool[key])) &&
+      (finite(spool.lipD) || finite(spool.core)) &&
       (spool.ratio == null || finite(spool.ratio));
     const measure = item => item && typeof item === "object" && id(item.id) &&
       finite(item.turns) && finite(item.count) &&
@@ -167,6 +253,7 @@
     const line = item => item && typeof item === "object" && id(item.id) &&
       typeof item.name === "string" && Array.isArray(item.measures) && item.measures.every(measure) &&
       (item.az == null || finite(item.az)) && (item.cast == null || finite(item.cast)) &&
+      (item.target == null || validTarget(item.target)) &&
       spool(item.spool);
     const place = item => item && typeof item === "object" && id(item.id) &&
       typeof item.name === "string" && (item.coords == null || typeof item.coords === "string") &&
@@ -222,17 +309,36 @@
     };
   }
 
+  // Истинный пеленг из точки в точку. Нужен, когда направление луча задано
+  // целью на карте, а не компасом (ADR-0012).
+  function bearingTo(origin, target){
+    const lat1 = Number(origin.lat) * Math.PI / 180;
+    const lat2 = Number(target.lat) * Math.PI / 180;
+    const dLon = (Number(target.lon) - Number(origin.lon)) * Math.PI / 180;
+    const y = Math.sin(dLon) * Math.cos(lat2);
+    const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+
+  // Цель важнее азимута: компас даёт склонение и наводку, карта - чистую геометрию.
+  function lineBearing(line, origin){
+    if (validTarget(line.target)) return bearingTo(origin, line.target);
+    return line.az == null || !Number.isFinite(Number(line.az)) ? null : Number(line.az);
+  }
+
   function projectSoundings(place, distanceForTurns){
     const origin = parseCoords(place && place.coords);
     if (!origin || typeof distanceForTurns !== "function" || !Array.isArray(place.lines)) return [];
     const result = [];
     place.lines.forEach(line => {
-      if (!Number.isFinite(Number(line.az)) || line.az == null || !Array.isArray(line.measures)) return;
+      if (!Array.isArray(line.measures)) return;
+      const bearing = lineBearing(line, origin);
+      if (bearing == null) return;
       const points = [];
       groupMeasures(line.measures).forEach(group => {
         const distanceMeters = Number(distanceForTurns(group.turns, line));
         if (!(distanceMeters > 0) || !Number.isFinite(distanceMeters)) return;
-        const point = destinationPoint(origin, Number(line.az), distanceMeters);
+        const point = destinationPoint(origin, bearing, distanceMeters);
         points.push({
           measureId:group.id,
           count:group.count,
@@ -307,7 +413,17 @@
 
   return {
     DEFAULT_REEL,
+    SPOOL_SIZES,
     normalizeDatabase,
+    normalizeSpool,
+    spoolOK,
+    perLayer,
+    spoolTurns,
+    metersToTurns,
+    turnsToMeters,
+    handleTurns,
+    bearingTo,
+    lineBearing,
     validImport,
     parseCoords,
     destinationPoint,

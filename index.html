@@ -485,51 +485,11 @@ const DEFCOL = "#F0B429";
 
 /* ============================================================
    МАТЕМАТИКА КАТУШКИ
-   Леска ложится слоями. В слое помещается (ширина шпули / диаметр
-   лески) витков, каждый следующий слой шире на два диаметра лески.
-   Длина витка = π × текущий диаметр намотки.
+   Живёт в app-core.js, чтобы прямое и обратное преобразования
+   были покрыты тестами (AGENT.md). Здесь только короткие имена.
    ============================================================ */
-const SPOOLS = {
-  "1000":[30,13], "1500":[31,13], "2000":[32,14], "2500":[34,14], "3000":[36,15],
-  "3500":[37,15], "4000":[38,16], "4500":[40,17], "5000":[41,17], "6000":[44,18],
-  "8000":[47,20], "10000":[50,22]
-};
-function spoolOK(s){ return s.core>0 && s.width>0 && s.lineD>0.01; }
-function perLayer(s){ return Math.max(1, Math.floor(s.width / s.lineD)); }
-
-function turnsForLength(L, s){          // сколько витков займёт L метров, считая от пустой шпули
-  if (!spoolOK(s) || L <= 0) return 0;
-  const N = perLayer(s); let rem = L, turns = 0, k = 0;
-  while (rem > 0 && k < 600){
-    const D = (s.core + (2*k+1)*s.lineD)/1000;
-    const layer = Math.PI * D * N;
-    if (rem >= layer){ turns += N; rem -= layer; k++; }
-    else { turns += rem / (Math.PI*D); rem = 0; }
-  }
-  return turns;
-}
-function lengthForTurns(T, s){          // сколько метров лески в T витках от пустой шпули
-  if (!spoolOK(s) || T <= 0) return 0;
-  const N = perLayer(s); let rem = T, len = 0, k = 0;
-  while (rem > 0 && k < 600){
-    const D = (s.core + (2*k+1)*s.lineD)/1000;
-    if (rem >= N){ len += Math.PI*D*N; rem -= N; k++; }
-    else { len += Math.PI*D*rem; rem = 0; }
-  }
-  return len;
-}
-// Обороты РУЧКИ: за один оборот ручки ротор делает «передаточное число» витков
-function ratio(s){ return s.ratio > 0 ? s.ratio : 1; }
-function metersToTurns(x, s){
-  const L = s.lineL; if (x <= 0) return 0; if (x > L) x = L;
-  return (turnsForLength(L, s) - turnsForLength(L - x, s)) / ratio(s);
-}
-function turnsToMeters(t, s){
-  const L = s.lineL, Tf = turnsForLength(L, s);
-  let rt = t * ratio(s); if (rt <= 0) return 0; if (rt > Tf) rt = Tf;
-  return L - lengthForTurns(Tf - rt, s);
-}
-function handleTurns(s){ return turnsForLength(s.lineL, s) / ratio(s); }
+const SPOOLS = AppCore.SPOOL_SIZES;
+const { spoolOK, perLayer, spoolTurns, metersToTurns, turnsToMeters, handleTurns } = AppCore;
 function activeSpool(){
   if (DB.activePreset){ const p = DB.presets.find(p=>p.id===DB.activePreset); if (p) return p.data; }
   return DB.reel;
@@ -578,6 +538,8 @@ function go(view, id, lid, wid){
   render(); window.scrollTo(0,0); closeDrawer();
 }
 function findLine(p, lid){ return (p.lines||[]).find(l => l.id === lid); }
+// Указание цели луча: экран карты водоёма переиспользуется как выбор точки.
+let pendingTarget = null;
 
 const ICON_MENU = '<path d="M3 6h18M3 12h18M3 18h18"/>';
 const ICON_BACK = '<path d="M15 5l-7 7 7 7"/>';
@@ -776,7 +738,7 @@ function viewLine(p, l){
       ${compassBadge(l.az, true)}
       <div style="flex:1;min-width:0">
         <h2>${esc(l.name)}</h2>
-        <div class="tiny muted" style="margin-top:3px">${ l.az==null ? "направление не задано" : "азимут " + l.az + "°" } · ${esc(spoolLabel(spoolForLine(l)))}${ l.spool ? "" : " (общая)" }</div>
+        <div class="tiny muted" style="margin-top:3px">${ l.target ? "цель на карте" : l.az==null ? "направление не задано" : "азимут " + l.az + "° (с компаса)" } · ${esc(spoolLabel(spoolForLine(l)))}${ l.spool ? "" : " (общая)" }</div>
       </div>
     </div>
     <div class="row" style="margin-top:12px">
@@ -1453,7 +1415,9 @@ function drawTop(cv, p){
    ГЕОРЕФЕРЕНСНАЯ КАРТА ВОДОЁМА
    ============================================================ */
 function viewWaterMap(waterbody){
+  const picking = pendingTarget && waterbodyForPlace(pendingTarget.placeId) === waterbody;
   return `
+  ${ picking ? `<div class="map-status" id="pickBanner" style="margin:0 0 10px">Тапните ориентир, в который целитесь этим лучом. Чем дальше точка, тем точнее направление. <button class="btn sm ghost" id="pickCancel" style="margin-top:8px">Отмена</button></div>` : "" }
   <div class="chartwrap"><div id="watermap" aria-label="Карта водоёма"></div></div>
   <div class="map-status" id="mapStatus">Загружаю локальный пакет водоёма...</div>`;
 }
@@ -1475,12 +1439,32 @@ async function afterWaterMap(waterbody){
       maxBoundsViscosity:0.7
     });
     viewCleanup = () => map.remove();
+    // Режим выбора цели луча: карта та же, добавляется только обработчик тапа (ADR-0012).
+    if (pendingTarget && waterbodyForPlace(pendingTarget.placeId) === waterbody){
+      const cancel = $("#pickCancel");
+      if (cancel) cancel.onclick = () => {
+        const back = pendingTarget;
+        pendingTarget = null;
+        go("line", back.placeId, back.lineId);
+      };
+      map.on("click", event => {
+        const request = pendingTarget;
+        if (!request) return;
+        const place = findPlace(request.placeId);
+        const line = place && findLine(place, request.lineId);
+        if (!line){ pendingTarget = null; return; }
+        line.target = { lat:event.latlng.lat, lon:event.latlng.lng };
+        pendingTarget = null;
+        save();
+        toast("Цель отмечена, азимут больше не используется");
+        go("line", request.placeId, request.lineId);
+      });
+    }
     if (isVector) {
       const bathyRes = await fetch(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/${encodeURIComponent(manifest.bathymetry)}`);
       if (!bathyRes.ok) throw new Error("Vector bathymetry missing");
       const bathymetry = await bathyRes.json();
       map.fitBounds(bounds, { padding:[12,12] });
-      
       const bandRenderer = L.canvas();
       bathymetry.bands.forEach(band => {
         const color = AppCore.depthColor(band.depth, bathymetry.depthMax);
@@ -1546,7 +1530,7 @@ async function afterWaterMap(waterbody){
       L.circleMarker([origin.lat,origin.lon], {
         radius:7, color:"#07171E", weight:2, fillColor:"#F0B429", fillOpacity:1
       }).bindTooltip(`<b>${esc(place.name)}</b><br>место ловли`).addTo(map);
-      missingAzimuth += (place.lines||[]).filter(line => (line.measures||[]).length && line.az == null).length;
+      missingAzimuth += (place.lines||[]).filter(line => (line.measures||[]).length && line.az == null && !line.target).length;
       missingSpool += (place.lines||[]).filter(line => (line.measures||[]).length && !spoolForLine(line)).length;
       AppCore.projectSoundings(place, lineDistance).forEach(line => {
         const source = (place.lines||[]).find(item => item.id === line.lineId);
@@ -1580,7 +1564,7 @@ async function afterWaterMap(waterbody){
     const notes = [`Показано мест: ${(waterbody.places||[]).length - missingCoords}`, `точек: ${counts.length}`];
     if (missingSpool) notes.push(`лучей без снасти: ${missingSpool}`);
     if (missingCoords) notes.push(`без координат: ${missingCoords}`);
-    if (missingAzimuth) notes.push(`лучей без азимута: ${missingAzimuth}`);
+    if (missingAzimuth) notes.push(`лучей без направления: ${missingAzimuth}`);
     const paintStatus = () => {
       const hidden = map.getZoom() < nativeMin;
       status.textContent = notes.concat(hidden ? ["батиметрия появится при увеличении"] : []).join(" · ");
@@ -1647,6 +1631,12 @@ function lineSheet(p, line){
         <button class="btn sm ghost" id="lComp" style="flex:0 0 auto;height:48px">Компас</button>
       </div></label>
     <div class="tiny muted" style="margin:-4px 0 12px">Встаньте лицом по направлению заброса, держите телефон ровно и нажмите «Компас» — цифра будет обновляться живьём.</div>
+    <label class="f"><span>Цель на карте</span>
+      <div style="display:flex;gap:8px">
+        <input type="text" id="lTarget" readonly value="${line && line.target ? fmt(line.target.lat,5) + ", " + fmt(line.target.lon,5) : ""}" placeholder="не задана">
+        <button class="btn sm ghost" id="lPick" style="flex:0 0 auto;height:48px">Указать</button>
+      </div></label>
+    <div class="tiny muted" style="margin:-4px 0 12px">Точнее компаса: компас смещён магнитным склонением и уводится железом катушки. Отметьте на карте ориентир, в который целитесь - край острова или берег у приметного дерева. Пока цель задана, азимут не используется.</div>
     <label class="f"><span>Дальность заброса, оборотов</span><input type="number" inputmode="decimal" step="1" id="lCast" value="${line&&line.cast?line.cast:""}" placeholder="80"></label>
     <label class="f"><span>Снасть</span><select id="lSpool">${spoolOptions}</select></label>
     <div class="tiny muted" style="margin:-4px 0 12px">Обороты этого луча переводятся в метры выбранной снастью. Пресеты берутся из калькулятора катушки; «общая» - те значения, что сейчас открыты в калькуляторе.</div>
@@ -1659,24 +1649,44 @@ function lineSheet(p, line){
   m.onclick = e => { if (e.target === m) closeModal(); };
   $("#lCancel").onclick = closeModal;
   $("#lComp").onclick = () => readCompass(deg => { $("#lAz").value = deg; });
-  $("#lOk").onclick = () => {
+  // Указание цели уводит на карту водоёма, поэтому правки луча сохраняем до ухода.
+  const collect = () => {
     const name = $("#lName").value.trim();
-    if (!name) return toast("Введите название луча");
+    if (!name) { toast("Введите название луча"); return null; }
     const azRaw = $("#lAz").value;
-    const az = azRaw === "" ? null : ((Math.round(num(azRaw)) % 360) + 360) % 360;
-    const cast = num($("#lCast").value) || null;
     const choice = $("#lSpool").value;
     let spool = choice === "keep" && line ? line.spool : null;
     if (choice !== "" && choice !== "keep"){
       const preset = DB.presets.find(item => item.id === choice);
       if (preset) spool = { name:preset.name, ...preset.data };
     }
-    if (line){ line.name = name; line.az = az; line.cast = cast; line.spool = spool; toast("Луч сохранён"); }
-    else {
-      p.lines = p.lines || [];
-      p.lines.push({ id: uid(), name, az, cast, spool, measures: [] });
-      toast("Луч создан");
-    }
+    return {
+      name,
+      az: azRaw === "" ? null : ((Math.round(num(azRaw)) % 360) + 360) % 360,
+      cast: num($("#lCast").value) || null,
+      spool
+    };
+  };
+  const commit = patch => {
+    if (line){ Object.assign(line, patch); return line; }
+    const created = { id: uid(), ...patch, target: null, measures: [] };
+    p.lines = p.lines || [];
+    p.lines.push(created);
+    return created;
+  };
+  $("#lPick").onclick = () => {
+    const patch = collect(); if (!patch) return;
+    const waterbody = waterbodyForPlace(p.id);
+    if (!waterbody || !waterbody.packageSlug) return toast("У водоёма нет пакета карты");
+    const saved = commit(patch);
+    pendingTarget = { placeId:p.id, lineId:saved.id };
+    save(); closeModal();
+    go("watermap", waterbody.id);
+  };
+  $("#lOk").onclick = () => {
+    const patch = collect(); if (!patch) return;
+    commit(patch);
+    toast(line ? "Луч сохранён" : "Луч создан");
     save(); closeModal(); render();
   };
   setTimeout(() => $("#lName").focus(), 60);
@@ -1694,11 +1704,11 @@ function viewReel(){
     <label class="f"><span>Размер (как на катушке)</span>
       <select id="rSize">${opts}<option value="custom" ${r.size==="custom"?"selected":""}>свой размер</option></select></label>
     <div class="row">
-      <label class="f"><span>Диаметр сердечника, мм</span><input type="number" inputmode="decimal" step="0.5" id="rCore" value="${r.core}"></label>
+      <label class="f"><span>Диаметр намотки, мм</span><input type="number" inputmode="decimal" step="0.5" id="rLipD" value="${r.lipD}"></label>
       <label class="f"><span>Ширина шпули, мм</span><input type="number" inputmode="decimal" step="0.5" id="rWidth" value="${r.width}"></label>
     </div>
     <label class="f"><span>Передаточное число (5.2:1)</span><input type="number" inputmode="decimal" step="0.1" id="rRatio" value="${r.ratio}"></label>
-    <div class="tiny muted">Размеры подставлены усреднённые. Замерьте свою шпулю линейкой, а передаточное число возьмите с корпуса катушки — расчёт станет точным.</div>
+    <div class="tiny muted">Диаметр намотки - главное число: именно оно переводит обороты в метры. Замерьте штангенциркулем через центр снятой шпули, губки ставьте на леску посередине между бортиками, шпуля должна быть намотана полностью. Пока не замерили, подставлено среднее по размеру - дальность будет врать.</div>
   </div>
 
   <div class="eyebrow">Леска или шнур</div>
@@ -1707,6 +1717,7 @@ function viewReel(){
       <label class="f"><span>Диаметр, мм</span><input type="number" inputmode="decimal" step="0.01" id="rLineD" value="${r.lineD}"></label>
       <label class="f"><span>Намотано, м</span><input type="number" inputmode="decimal" step="5" id="rLineL" value="${r.lineL}"></label>
     </div>
+    <div class="tiny muted" style="margin-top:10px">Длина лески ограничивает дальность и не влияет на метры за оборот: сколько лески уходит за оборот, определяет диаметр намотки.</div>
   </div>
 
   <div class="eyebrow">Результат</div>
@@ -1729,11 +1740,17 @@ function viewReel(){
       <input type="text" id="pName" placeholder="Например: Феникс 4000 + 0.25">
       <button class="btn primary" id="pSave" style="flex:0 0 auto">Сохранить</button>
     </div>
+  </div>
+
+  <div class="eyebrow">Записанные лучи</div>
+  <div class="card">
+    <div id="applyInfo"></div>
+    <div class="tiny muted" style="margin-top:8px">Диаметр намотки из калькулятора рассылается по уже записанным лучам. Нужно после того, как замерили шпулю: снимок снасти в луче заморожен и сам не обновится.</div>
   </div>`;
 }
 function readReel(){
   return {
-    size: $("#rSize").value, core: num($("#rCore").value), width: num($("#rWidth").value),
+    size: $("#rSize").value, lipD: num($("#rLipD").value), width: num($("#rWidth").value),
     ratio: num($("#rRatio").value), lineD: num($("#rLineD").value), lineL: num($("#rLineL").value)
   };
 }
@@ -1742,12 +1759,13 @@ function afterReel(){
     if (detachPreset) DB.activePreset = null;
     DB.reel = readReel(); save();
     if (detachPreset) paint();
+    paintApply();
     const s = DB.reel, out = $("#rOut");
     if (!spoolOK(s) || s.lineL <= 0){ out.innerHTML = `<div class="span2"><div class="k">Нет данных</div><div class="v">— · —</div></div>`; return; }
     const H = handleTurns(s);
     const first = turnsToMeters(1, s);                 // метры за первый оборот ручки (шпуля полная)
     const last  = s.lineL - turnsToMeters(H-1, s);     // метры за последний оборот (шпуля почти пустая)
-    const layers = Math.ceil(turnsForLength(s.lineL, s) / perLayer(s));
+    const layers = Math.ceil(spoolTurns(s) / perLayer(s));
     out.innerHTML =
       `<div class="span2"><div class="k">Оборотов ручки на ${fmt(s.lineL)} м</div><div class="v big">${fmt(H,0)}</div></div>
        <div><div class="k">За оборот, полная</div><div class="v">${fmt(first,2)} м</div></div>
@@ -1757,10 +1775,10 @@ function afterReel(){
   };
   $("#rSize").onchange = e => {
     const v = e.target.value;
-    if (SPOOLS[v]){ $("#rCore").value = SPOOLS[v][0]; $("#rWidth").value = SPOOLS[v][1]; }
+    if (SPOOLS[v]){ $("#rLipD").value = SPOOLS[v][0]; $("#rWidth").value = SPOOLS[v][1]; }
     recalc(true);
   };
-  ["#rCore","#rWidth","#rRatio","#rLineD","#rLineL"].forEach(id => $(id).oninput = () => recalc(true));
+  ["#rLipD","#rWidth","#rRatio","#rLineD","#rLineL"].forEach(id => $(id).oninput = () => recalc(true));
 
   const cM = $("#cM"), cT = $("#cT");
   cM.oninput = () => { const s = readReel(); cT.value = cM.value === "" ? "" : inputFmt(metersToTurns(num(cM.value), s), 1); };
@@ -1780,6 +1798,42 @@ function afterReel(){
       save(); paint();
     });
   };
+
+  // Снимок снасти в луче заморожен (ADR-0006), и это правильно: промер - исторический
+  // факт. Но диаметр намотки был не «выбран», а взят из таблицы по ошибке, поэтому
+  // рассылаем ТОЛЬКО его. Передаточное, леска и длина у каждого луча остаются свои.
+  const spoolGroups = () => {
+    const groups = new Map();
+    (DB.waterbodies||[]).forEach(w => (w.places||[]).forEach(p => (p.lines||[]).forEach(l => {
+      if (!l.spool) return;
+      const key = l.spool.name || "без названия";
+      if (!groups.has(key)) groups.set(key, { name:l.spool.name || null, label:key, lines:[] });
+      groups.get(key).lines.push(l);
+    })));
+    return [...groups.values()];
+  };
+  const paintApply = () => {
+    const groups = spoolGroups(), box = $("#applyInfo"), current = num($("#rLipD").value);
+    if (!groups.length){
+      box.innerHTML = `<div class="tiny muted">Ни в одном луче снасть пока не записана.</div>`;
+      return;
+    }
+    box.innerHTML = groups.map((group, index) => {
+      const seen = [...new Set(group.lines.map(l => Number(l.spool.lipD)))];
+      const same = seen.length === 1 && Math.abs(seen[0] - current) < 0.05;
+      return `<div class="row" style="align-items:center;margin-bottom:8px">
+        <div class="tiny" style="flex:1"><b>${esc(group.label)}</b> · лучей ${group.lines.length} · намотка ${seen.map(d => fmt(d,1)).join(" / ")} мм</div>
+        <button class="btn sm ghost" data-apply="${index}" style="flex:0 0 auto" ${same?"disabled":""}>${same ? "совпадает" : "поставить " + fmt(current,1)}</button>
+      </div>`;
+    }).join("");
+    box.querySelectorAll("[data-apply]").forEach(button => button.onclick = () => {
+      const group = groups[Number(button.dataset.apply)];
+      const lipD = num($("#rLipD").value);
+      if (!(lipD > 0)) return toast("Сначала укажите диаметр намотки");
+      group.lines.forEach(l => { l.spool.lipD = lipD; });
+      save(); paintApply(); toast(`Обновлено лучей: ${group.lines.length}`);
+    });
+  };
   $("#pSave").onclick = () => {
     const name = $("#pName").value.trim();
     if (!name) return toast("Введите название пресета");
@@ -1787,7 +1841,7 @@ function afterReel(){
     DB.presets.push(p); DB.activePreset = p.id; DB.reel = p.data;
     $("#pName").value = ""; save(); paint(); toast("Пресет сохранён");
   };
-  recalc(); paint();
+  recalc(); paint(); paintApply();
 }
 
 /* ============================================================

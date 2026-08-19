@@ -123,6 +123,118 @@ test("projectSoundings проецирует лучи с азимутом и сч
   assert.ok(projected[1].points[0].lon < 0);
 });
 
+test("normalizeSpool переводит старый сердечник в диаметр намотки по размеру катушки", () => {
+  const bySize = Core.normalizeSpool({ size:"5000", core:41, width:17, ratio:5.1, lineD:0.14, lineL:150 });
+  assert.equal(bySize.lipD, 52);
+  assert.equal(bySize.core, undefined);
+
+  // «Свой размер»: таблицы нет, остаётся только масштабировать сердечник
+  const custom = Core.normalizeSpool({ size:"custom", core:40, width:17, lineD:0.14, lineL:150 });
+  assert.equal(custom.lipD, 50);
+
+  // Уже переведённую снасть трогать нельзя: замер штангенциркулем важнее таблицы
+  const measured = Core.normalizeSpool({ size:"5000", lipD:49.5, width:17, lineD:0.14, lineL:150 });
+  assert.equal(measured.lipD, 49.5);
+});
+
+test("normalizeDatabase переводит на диаметр намотки и катушку, и пресеты, и лучи", () => {
+  const result = Core.normalizeDatabase({
+    reel:{ size:"4000", core:38, width:16, ratio:5.3, lineD:0.14, lineL:100 },
+    presets:[{ id:"p", name:"3", data:{ size:"4000", core:38, width:16, ratio:5.3, lineD:0.14, lineL:100 } }],
+    waterbodies:[{ id:"w", name:"Горново", type:"reservoir", places:[{ id:"pl", name:"м", lines:[
+      { id:"l", name:"луч", az:152, spool:{ name:"3", size:"4000", core:38, width:16, ratio:5.3, lineD:0.14, lineL:100 }, measures:[] }
+    ] }] }]
+  }, () => "id");
+
+  assert.equal(result.reel.lipD, 47);
+  assert.equal(result.reel.core, undefined);
+  assert.equal(result.presets[0].data.lipD, 47);
+  assert.equal(result.waterbodies[0].places[0].lines[0].spool.lipD, 47);
+  assert.equal(result.waterbodies[0].places[0].lines[0].target, null);
+});
+
+test("turnsToMeters и metersToTurns строго обратны на границах", () => {
+  const spool = { size:"5000", lipD:49.5, width:17, ratio:5.1, lineD:0.14, lineL:150 };
+
+  assert.equal(Core.turnsToMeters(0, spool), 0);
+  assert.equal(Core.metersToTurns(0, spool), 0);
+  assert.equal(Core.turnsToMeters(-5, spool), 0);
+  assert.equal(Core.metersToTurns(-5, spool), 0);
+
+  // Обрезка по длине лески в обе стороны
+  const all = Core.turnsToMeters(Core.handleTurns(spool), spool);
+  assert.ok(Math.abs(all - spool.lineL) < 1e-6);
+  assert.ok(Math.abs(Core.turnsToMeters(10000, spool) - spool.lineL) < 1e-6);
+  assert.equal(Core.metersToTurns(10000, spool), Core.metersToTurns(spool.lineL, spool));
+
+  for (const turns of [1, 7.5, 44, 95, 150]){
+    const meters = Core.turnsToMeters(turns, spool);
+    assert.ok(Math.abs(Core.metersToTurns(meters, spool) - turns) < 1e-9, `обороты ${turns}`);
+  }
+  for (const meters of [0.5, 12, 74.5, 149.9]){
+    const turns = Core.metersToTurns(meters, spool);
+    assert.ok(Math.abs(Core.turnsToMeters(turns, spool) - meters) < 1e-9, `метры ${meters}`);
+  }
+});
+
+test("метры за оборот считаются от диаметра намотки и падают по мере схода лески", () => {
+  // Kaida Vinner 4000: замер 43 мм при 5.3 даёт паспортные 72 см за оборот
+  const kaida = { lipD:43, width:16, ratio:5.3, lineD:0.14, lineL:100 };
+  assert.ok(Math.abs(Core.turnsToMeters(1, kaida) - 0.716) < 0.005);
+
+  // Mifine 5000, мелкая шпуля: замер 49.5 мм, 95 оборотов - контрольная точка
+  const mifine = { lipD:49.5, width:17, ratio:5.1, lineD:0.14, lineL:150 };
+  assert.ok(Math.abs(Core.turnsToMeters(95, mifine) - 74.5) < 0.5);
+
+  // Диаметр падает вместе с намоткой, поэтому поздние обороты короче ранних
+  const first = Core.turnsToMeters(1, mifine);
+  const last = Core.turnsToMeters(100, mifine) - Core.turnsToMeters(99, mifine);
+  assert.ok(last < first);
+
+  assert.equal(Core.turnsToMeters(10, { lipD:0, width:17, ratio:5, lineD:0.14, lineL:150 }), 0);
+});
+
+test("направление луча берётся от цели и игнорирует азимут", () => {
+  const origin = { lat:0, lon:0 };
+
+  assert.ok(Math.abs(Core.bearingTo(origin, { lat:0, lon:1 }) - 90) < 1e-6);
+  assert.ok(Math.abs(Core.bearingTo(origin, { lat:1, lon:0 })) < 1e-6);
+
+  // Цель важнее записанного азимута
+  assert.ok(Math.abs(Core.lineBearing({ az:270, target:{ lat:0, lon:1 } }, origin) - 90) < 1e-6);
+  assert.equal(Core.lineBearing({ az:270, target:null }, origin), 270);
+  assert.equal(Core.lineBearing({ az:null, target:null }, origin), null);
+});
+
+test("projectSoundings ведёт луч в цель, а без цели - по азимуту", () => {
+  const place = {
+    id:"p1", coords:"0, 0", lines:[
+      { id:"target", az:270, target:{ lat:0, lon:1 }, measures:[{ id:"m1", turns:10, count:4 }] },
+      { id:"compass", az:270, measures:[{ id:"m2", turns:10, count:4 }] },
+      { id:"nothing", az:null, target:null, measures:[{ id:"m3", turns:10, count:4 }] }
+    ]
+  };
+
+  const projected = Core.projectSoundings(place, turns => turns * 10);
+
+  assert.deepEqual(projected.map(item => item.lineId), ["target", "compass"]);
+  assert.ok(projected[0].points[0].lon > 0, "цель на востоке перебивает азимут 270");
+  assert.ok(projected[1].points[0].lon < 0, "без цели работает азимут 270");
+});
+
+test("validImport принимает и старый сердечник, и новый диаметр намотки, и цель", () => {
+  const withLine = spool => ({ waterbodies:[{ id:"w1", name:"Озеро", type:"lake", places:[{
+    id:"p1", name:"Пирс", lines:[{ id:"l1", name:"На яму", measures:[], ...spool }]
+  }]}]});
+
+  assert.equal(Core.validImport(withLine({ spool:{ size:"5000", lipD:49.5, width:17, ratio:5.1, lineD:0.14, lineL:150 } })), true);
+  assert.equal(Core.validImport(withLine({ spool:{ size:"5000", core:41, width:17, ratio:5.1, lineD:0.14, lineL:150 } })), true);
+  assert.equal(Core.validImport(withLine({ spool:{ size:"5000", width:17, ratio:5.1, lineD:0.14, lineL:150 } })), false);
+  assert.equal(Core.validImport(withLine({ target:{ lat:52.09, lon:26.22 } })), true);
+  assert.equal(Core.validImport(withLine({ target:{ lat:91, lon:26.22 } })), false);
+  assert.equal(Core.validImport(withLine({ target:{ lat:"север", lon:26.22 } })), false);
+});
+
 test("groupMeasures усредняет счёт с шагом 0.5 и не трогает исходный массив", () => {
   const measures = [
     { id:"m1", turns:50, count:24 },
