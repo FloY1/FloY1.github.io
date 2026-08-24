@@ -265,11 +265,6 @@ input[type=file]{display:none}
   padding:11px 18px;border-radius:24px;font-size:14px;z-index:80;opacity:0;pointer-events:none;transition:.2s;
 }
 #toast.on{opacity:1;transform:translateX(-50%)}
-#updateBtn{
-  position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);
-  z-index:35;box-shadow:0 8px 22px rgba(2,10,14,.5);white-space:nowrap;
-}
-#updateBtn[hidden]{display:none}
 .depth-label{
   font-family:var(--font-num);font-size:11px;color:rgba(255,255,255,.6);
   text-shadow:-1px -1px 1px #000, 1px -1px 1px #000, -1px 1px 1px #000, 1px 1px 1px #000;
@@ -302,11 +297,11 @@ input[type=file]{display:none}
   <button class="mitem" id="importBtn"><svg viewBox="0 0 24 24"><path d="M12 15V3m0 0L8 7m4-4l4 4M4 17v3h16v-3"/></svg>Загрузить копию</button>
   <input type="file" id="importFile" accept="application/json,.json">
   <button class="mitem" id="installBtn"><svg viewBox="0 0 24 24"><rect x="6" y="2.5" width="12" height="19" rx="2.5"/><path d="M12 7.5v6m0 0l-2.5-2.5M12 13.5l2.5-2.5"/></svg>Установить на телефон</button>
+  <button class="mitem" id="updateBtn"><svg viewBox="0 0 24 24"><path d="M20 6v5h-5M4 18v-5h5M6.1 9a7 7 0 0 1 11.8-2.5L20 11M4 13l2.1 4.5A7 7 0 0 0 17.9 15"/></svg><span id="updateLabel">Обновить приложение</span></button>
   <div class="drawer-foot">Данные хранятся только в этом телефоне.<br>Интернет не нужен.</div>
 </aside>
 
 <div id="modal"></div>
-<button class="btn primary" id="updateBtn" hidden>Обновить приложение</button>
 <div id="toast"></div>
 <script src="vendor/leaflet/leaflet.js"></script>
 <script src="app-core.js"></script>
@@ -2063,27 +2058,73 @@ $("#installBtn").onclick = async () => {
 syncInstall();
 window.addEventListener("keydown", event => { if (event.key === "Escape"){ closeModal(); closeDrawer(); } });
 let swReloading = false;
+let swRegistration = null;
+const trackedWorkers = new WeakSet();
+function resetUpdateButton(){
+  const button = $("#updateBtn");
+  button.disabled = false;
+  $("#updateLabel").textContent = "Обновить приложение";
+  button.onclick = checkUpdate;
+}
 function offerUpdate(worker){
   if (!worker || !navigator.serviceWorker.controller) return;
   const button = $("#updateBtn");
-  button.hidden = false;
+  button.disabled = false;
+  $("#updateLabel").textContent = "Обновить приложение";
   button.onclick = () => {
+    closeDrawer();
     button.disabled = true;
-    button.textContent = "Обновляю…";
+    $("#updateLabel").textContent = "Обновляю…";
     worker.postMessage({ type:"skip-waiting" });
   };
 }
-function watchServiceWorker(registration){
-  offerUpdate(registration.waiting);
-  registration.addEventListener("updatefound", () => {
-    const worker = registration.installing;
-    if (!worker) return;
-    worker.addEventListener("statechange", () => { if (worker.state === "installed") offerUpdate(worker); });
+function trackInstalling(worker){
+  if (!worker) return;
+  const button = $("#updateBtn");
+  button.disabled = true;
+  $("#updateLabel").textContent = "Загружаю обновление…";
+  if (trackedWorkers.has(worker)) return;
+  trackedWorkers.add(worker);
+  worker.addEventListener("statechange", () => {
+    if (worker.state === "installed"){
+      if (navigator.serviceWorker.controller) offerUpdate(worker);
+      else resetUpdateButton();
+    } else if (worker.state === "redundant"){
+      resetUpdateButton();
+      toast("Не удалось загрузить обновление");
+    }
   });
+}
+async function checkUpdate(){
+  closeDrawer();
+  if (!swRegistration) return toast("Обновление недоступно");
+  const button = $("#updateBtn");
+  button.disabled = true;
+  $("#updateLabel").textContent = "Проверяю обновление…";
+  try {
+    await swRegistration.update();
+    if (swRegistration.waiting) offerUpdate(swRegistration.waiting);
+    else if (swRegistration.installing) trackInstalling(swRegistration.installing);
+    else {
+      resetUpdateButton();
+      toast("Установлена последняя версия");
+    }
+  } catch(error){
+    resetUpdateButton();
+    toast("Не удалось проверить обновление");
+  }
+}
+function watchServiceWorker(registration){
+  swRegistration = registration;
+  resetUpdateButton();
+  offerUpdate(registration.waiting);
+  trackInstalling(registration.installing);
+  registration.addEventListener("updatefound", () => trackInstalling(registration.installing));
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") registration.update().catch(() => {});
   });
 }
+resetUpdateButton();
 Promise.all([load(), loadLakeCatalog()]).then(() => {
   render();
   if ("serviceWorker" in navigator){
