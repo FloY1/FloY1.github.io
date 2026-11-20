@@ -1,9 +1,12 @@
 "use strict";
 
-const SW_VERSION = "2026-08-24T11:35:42.772Z";
+const SW_VERSION = "2026-08-26T09:44:25.601Z";
 const CACHE_PREFIX = "echo-map-";
 const CACHE_NAME = `${CACHE_PREFIX}${SW_VERSION}`;
 const PRECACHE_RELEASE = SW_VERSION.replace(/[:.]/g, "-");
+// Карты глубин пользователь качает вручную. Их cache не версионный: ключи - immutable
+// URL релиза, поэтому обновление оболочки не стирает скачанное (ADR-0013).
+const PACKAGE_CACHE = "echo-lake-packages";
 const CORE_FILES = [
   "./",
   "./index.html",
@@ -61,12 +64,29 @@ self.addEventListener("message", event => {
   if (event.data && event.data.type === "skip-waiting") self.skipWaiting();
 });
 
+// Оставляет в PACKAGE_CACHE только файлы активных release: URL мёртвого релиза
+// уже никто не запросит, а место занимает.
+async function prunePackages(){
+  if (!(await caches.keys()).includes(PACKAGE_CACHE)) return;
+  const versioned = await caches.open(CACHE_NAME);
+  const response = await versioned.match("./lakes/index.json");
+  if (!response) return;
+  const registry = await response.json();
+  const active = (registry.waterbodies || []).map(item => `/lakes/${item.slug}/${item.release}/`);
+  const packages = await caches.open(PACKAGE_CACHE);
+  for (const request of await packages.keys()){
+    const pathname = new URL(request.url).pathname;
+    if (!active.some(prefix => pathname.includes(prefix))) await packages.delete(request);
+  }
+}
+
 self.addEventListener("activate", event => {
   event.waitUntil((async () => {
     const names = await caches.keys();
     await Promise.all(names
       .filter(name => name.startsWith(CACHE_PREFIX) && name !== CACHE_NAME)
       .map(name => caches.delete(name)));
+    await prunePackages();
   })());
 });
 
@@ -74,10 +94,16 @@ self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
+  // Явная загрузка карты глубин идёт мимо worker'а: только так страница дотягивается
+  // до сети, оставаясь cache-only для всего остального.
+  if (url.searchParams.has("dl")) return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
     if (cached) return cached;
+    const packages = await caches.open(PACKAGE_CACHE);
+    const downloaded = await packages.match(event.request);
+    if (downloaded) return downloaded;
     if (event.request.mode === "navigate") return cache.match("./index.html");
     return new Response("Asset is not precached", {
       status:504,

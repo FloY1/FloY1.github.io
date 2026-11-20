@@ -12,11 +12,11 @@ function absoluteKey(input){
   return new URL(typeof input === "string" ? input : input.url, "http://site.test/").href;
 }
 
-function createRuntime(publishedVersion){
+function createRuntime(publishedVersion, waterbodies = []){
   const listeners = new Map();
   const stores = new Map();
   const requests = [];
-  const registry = generatedAt => ({ generatedAt, waterbodies:[] });
+  const registry = generatedAt => ({ generatedAt, waterbodies });
   const caches = {
     async open(name){
       if (!stores.has(name)){
@@ -24,7 +24,9 @@ function createRuntime(publishedVersion){
         stores.set(name, {
           entries,
           async put(key, response){ entries.set(absoluteKey(key), response.clone()); },
-          async match(key){ return entries.get(absoluteKey(key))?.clone(); }
+          async match(key){ return entries.get(absoluteKey(key))?.clone(); },
+          async keys(){ return [...entries.keys()].map(url => ({ url })); },
+          async delete(key){ return entries.delete(absoluteKey(key)); }
         });
       }
       return stores.get(name);
@@ -108,7 +110,7 @@ test("service worker связывает cache только со своим immut
   assert.equal(await navigation.text(), "asset");
 
   await runWaitUntil(runtime.listeners.get("activate"));
-  assert.deepEqual(await runtime.caches.keys(), [CACHE_NAME]);
+  assert.deepEqual(await runtime.caches.keys(), [CACHE_NAME, "echo-lake-packages"]);
 });
 
 test("service worker выходит из ожидания только по явному сообщению", () => {
@@ -121,4 +123,40 @@ test("service worker выходит из ожидания только по яв
 
   listener({ data:{ type:"skip-waiting" } });
   assert.equal(runtime.skips(), 1);
+});
+
+test("service worker пропускает явную загрузку карты глубин в сеть", async () => {
+  const runtime = createRuntime(SW_VERSION);
+  await runWaitUntil(runtime.listeners.get("install"));
+
+  const passed = runFetch(runtime.listeners.get("fetch"), {
+    method:"GET",
+    url:`http://site.test/lakes/test/R1/bathymetry.json?dl=1`,
+    mode:"cors"
+  });
+  assert.equal(passed, undefined, "запрос с ?dl=1 worker не перехватывает");
+});
+
+test("service worker отдаёт скачанную карту глубин и чистит мёртвые релизы", async () => {
+  const runtime = createRuntime(SW_VERSION, [{ slug:"test", release:"R1" }]);
+  await runWaitUntil(runtime.listeners.get("install"));
+
+  const packages = await runtime.caches.open("echo-lake-packages");
+  await packages.put("http://site.test/lakes/test/R1/bathymetry.json", new Response("bands"));
+  await packages.put("http://site.test/lakes/test/R0/bathymetry.json", new Response("stale"));
+
+  const hit = await runFetch(runtime.listeners.get("fetch"), {
+    method:"GET",
+    url:"http://site.test/lakes/test/R1/bathymetry.json",
+    mode:"cors"
+  });
+  assert.equal(await hit.text(), "bands");
+
+  await runWaitUntil(runtime.listeners.get("activate"));
+  assert.deepEqual(
+    (await packages.keys()).map(request => request.url),
+    ["http://site.test/lakes/test/R1/bathymetry.json"]
+  );
+  assert.ok((await runtime.caches.keys()).includes("echo-lake-packages"),
+    "cache карт глубин не версионный и живёт между обновлениями оболочки");
 });

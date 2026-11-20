@@ -4,7 +4,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import {
   bboxFromGeometry,
   tilesForBbox,
@@ -298,10 +298,13 @@ test("buildLakePackage собирает векторный пакет из кэ�
   assert.ok(bathymetry.bands.length > 0, "z18 фикстура дала полосы");
   assert.ok(Object.keys(bathymetry.labels).length > 0, "подписи есть хотя бы на одном уровне");
 
-  // Precache версии обязан включать bathymetry.json.
+  // Батиметрия из precache версии исключена: её качает пользователь. Размер лежит в реестре.
   const precache = JSON.parse(await readFile(path.join(root, "lakes/precache", `${release}.json`), "utf8"));
-  assert.ok(precache.files.includes(`lakes/test/${release}/bathymetry.json`));
+  assert.ok(!precache.files.includes(`lakes/test/${release}/bathymetry.json`));
   assert.ok(precache.files.includes(`lakes/test/${release}/lake.json`));
+  const registry = JSON.parse(await readFile(path.join(root, "lakes/index.json"), "utf8"));
+  const entry = registry.waterbodies.find(item => item.slug === "test");
+  assert.equal(entry.bathymetryBytes, (await stat(path.join(packageDir, "bathymetry.json"))).size);
   assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-11T00:00:00.000Z";/);
 
   // Повторная сборка тем же generatedAt воспроизводима и снова без сети.
@@ -495,10 +498,14 @@ test("buildLakePackageBatch выпускает несколько пакетов
   const registryText = await readFile(path.join(root, "lakes/index.json"), "utf8");
   assert.equal(await readFile(path.join(root, "lakes/registry", `${release}.json`), "utf8"), registryText);
   const precache = JSON.parse(await readFile(path.join(root, "lakes/precache", `${release}.json`), "utf8"));
-  assert.ok(precache.files.includes(`lakes/alpha/${release}/bathymetry.json`));
-  assert.ok(precache.files.includes(`lakes/beta/${release}/bathymetry.json`));
+  assert.ok(!precache.files.includes(`lakes/alpha/${release}/bathymetry.json`));
+  assert.ok(!precache.files.includes(`lakes/beta/${release}/bathymetry.json`));
   assert.ok(precache.files.includes(`lakes/alpha/${release}/lake.json`));
   assert.ok(precache.files.includes(`lakes/beta/${release}/lake.json`));
+  for (const slug of ["alpha", "beta"]){
+    const entry = registry.waterbodies.find(item => item.slug === slug);
+    assert.equal(entry.bathymetryBytes, (await stat(path.join(root, "lakes", slug, release, "bathymetry.json"))).size);
+  }
   assert.match(await readFile(serviceWorkerPath, "utf8"), /const SW_VERSION = "2026-08-11T00:00:00.000Z";/);
   for (const slug of ["alpha", "beta"]){
     const manifest = JSON.parse(await readFile(path.join(root, "lakes", slug, release, "lake.json"), "utf8"));

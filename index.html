@@ -328,6 +328,9 @@ async function rawSet(v){
 let DB = { waterbodies:[], reel:null, presets:[], activePreset:null, chartMeters:false };
 let LAKE_CATALOG = [];
 const LAKE_MANIFESTS = new Map();
+// Карты глубин лежат в отдельном не версионном cache: их качает пользователь, и
+// обновление оболочки их не стирает. Имя обязано совпадать с PACKAGE_CACHE в sw.js.
+const PACKAGE_CACHE = "echo-lake-packages";
 let saveTimer = null;
 function save(){ clearTimeout(saveTimer); saveTimer = setTimeout(()=>rawSet(JSON.stringify(DB)), 120); }
 function normalizeDB(){ DB = AppCore.normalizeDatabase(DB, uid); }
@@ -353,6 +356,60 @@ async function loadLakeManifest(slug){
   }
   LAKE_MANIFESTS.set(slug, manifest);
   return manifest;
+}
+function catalogEntry(slug){
+  return LAKE_CATALOG.find(item => item && item.slug === slug) || null;
+}
+function bathymetryUrl(manifest){
+  return `lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/${encodeURIComponent(manifest.bathymetry)}`;
+}
+function fmtMB(bytes){
+  return (bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0) + " МБ";
+}
+async function packageCache(){
+  if (!window.caches) return null;
+  try { return await caches.open(PACKAGE_CACHE); } catch(e){ return null; }
+}
+async function packageStored(url){
+  const cache = await packageCache();
+  return cache ? !!(await cache.match(url)) : false;
+}
+async function packageBody(url){
+  const cache = await packageCache();
+  if (!cache) return null;
+  const response = await cache.match(url);
+  return response ? response.json() : null;
+}
+// Качает карту глубин по явной команде. Суффикс ?dl=1 просит service worker пропустить
+// запрос в сеть; в cache файл кладётся под чистым URL релиза.
+async function downloadPackage(url, total, onProgress){
+  const cache = await packageCache();
+  if (!cache) throw new Error("хранилище недоступно");
+  const response = await fetch(url + "?dl=1", { cache:"reload" });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  const reader = response.body && response.body.getReader ? response.body.getReader() : null;
+  const chunks = [];
+  let received = 0;
+  if (reader){
+    for (;;){
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (onProgress) onProgress(received, total);
+    }
+  } else {
+    const buffer = await response.arrayBuffer();
+    chunks.push(new Uint8Array(buffer));
+    received = buffer.byteLength;
+  }
+  const blob = new Blob(chunks, { type:"application/json" });
+  await cache.put(url, new Response(blob, { headers:{ "content-type":"application/json" } }));
+  return received;
+}
+async function dropPackage(url){
+  const cache = await packageCache();
+  if (cache) await cache.delete(url);
 }
 async function load(){
   const raw = await rawGet();
@@ -607,6 +664,10 @@ function viewWaterbody(waterbody){
       <span class="waterbody-kind">${esc(waterbodyTypeName(waterbody.type))}</span>
     </div>
     <div class="tiny muted" style="margin-top:6px">${waterbody.packageSlug ? "Пакет батиметрии: " + esc(packageName(waterbody.packageSlug)) : "Пакет батиметрии не привязан"}</div>
+    ${waterbody.packageSlug ? `<div class="row" style="margin-top:10px;align-items:center;gap:10px">
+      <div class="tiny" id="pkgState" style="flex:1">Карта глубин: проверяю…</div>
+      <button class="btn sm ghost" id="pkgAction" hidden></button>
+    </div>` : ""}
     <div class="row" style="margin-top:12px">
       <button class="btn sm ghost" id="editWaterbody">Изменить</button>
       <button class="btn sm ghost danger" id="delWaterbody">Удалить</button>
@@ -644,6 +705,75 @@ function afterWaterbody(waterbody){
     const [placeId, lineId] = canvas.dataset.spark.split("|");
     drawSpark(canvas, findLine(findPlace(placeId), lineId));
   });
+  if (waterbody.packageSlug) paintPackageRow(waterbody.packageSlug);
+}
+// Состояние карты глубин: скачана / не скачана / встроена. Кнопка качает и удаляет
+// пакет по явной команде - автоматически ничего не загружается (ADR-0013).
+async function paintPackageRow(slug){
+  const state = $("#pkgState"), action = $("#pkgAction");
+  if (!state || !action) return;
+  let manifest = null;
+  try { manifest = await loadLakeManifest(slug); } catch(e){}
+  if (!state.isConnected) return;
+  if (!manifest){
+    state.textContent = "Карта глубин: пакет недоступен";
+    action.hidden = true;
+    return;
+  }
+  if (!(manifest.format === 2 && manifest.bathymetry)){
+    state.textContent = "Карта глубин: встроена в пакет";
+    action.hidden = true;
+    return;
+  }
+  const cache = await packageCache();
+  if (!cache){
+    state.textContent = "Карта глубин: хранилище недоступно";
+    action.hidden = true;
+    return;
+  }
+  const url = bathymetryUrl(manifest);
+  const entry = catalogEntry(slug);
+  const size = entry && Number(entry.bathymetryBytes) > 0 ? Number(entry.bathymetryBytes) : 0;
+  const sizeText = size ? " · " + fmtMB(size) : "";
+  if (!state.isConnected) return;
+  action.hidden = false;
+  action.disabled = false;
+  if (await packageStored(url)){
+    state.textContent = "Карта глубин скачана" + sizeText;
+    action.textContent = "Удалить";
+    action.classList.add("danger");
+    action.onclick = async () => {
+      await dropPackage(url);
+      toast("Карта глубин удалена");
+      paintPackageRow(slug);
+    };
+    return;
+  }
+  state.textContent = "Карта глубин не скачана" + sizeText;
+  action.textContent = "Скачать";
+  action.classList.remove("danger");
+  action.onclick = () => runPackageDownload(url, size, action, () => paintPackageRow(slug));
+}
+async function runPackageDownload(url, size, button, done){
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = size ? "0%" : "…";
+  try {
+    await downloadPackage(url, size, (received, total) => {
+      if (!button.isConnected) return;
+      button.textContent = total
+        ? Math.min(100, Math.round(received / total * 100)) + "%"
+        : fmtMB(received);
+    });
+    toast("Карта глубин скачана");
+  } catch(error){
+    toast("Не удалось скачать: " + error.message);
+  }
+  if (button.isConnected){
+    button.disabled = false;
+    button.textContent = label;
+  }
+  if (done) done();
 }
 
 /* ============================================================
@@ -1455,10 +1585,11 @@ async function afterWaterMap(waterbody){
         go("line", request.placeId, request.lineId);
       });
     }
-    if (isVector) {
-      const bathyRes = await fetch(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/${encodeURIComponent(manifest.bathymetry)}`);
-      if (!bathyRes.ok) throw new Error("Vector bathymetry missing");
-      const bathymetry = await bathyRes.json();
+    // Батиметрия берётся только из скачанного пакета: в сеть экран не ходит.
+    const bathyUrl = isVector ? bathymetryUrl(manifest) : null;
+    const bathymetry = bathyUrl ? await packageBody(bathyUrl) : null;
+    const missingPackage = isVector && !bathymetry ? bathyUrl : null;
+    if (bathymetry) {
       map.fitBounds(bounds, { padding:[12,12] });
       const bandRenderer = L.canvas();
       bathymetry.bands.forEach(band => {
@@ -1496,6 +1627,8 @@ async function afterWaterMap(waterbody){
       map.on("zoomend moveend", updateLabels);
       updateLabels();
       
+      if (manifest.attribution) map.attributionControl.addAttribution(manifest.attribution);
+    } else if (isVector) {
       if (manifest.attribution) map.attributionControl.addAttribution(manifest.attribution);
     } else {
       L.tileLayer(`lakes/${encodeURIComponent(manifest.slug)}/${encodeURIComponent(manifest.release)}/tiles/{z}/{x}/{y}.png`, {
@@ -1560,12 +1693,22 @@ async function afterWaterMap(waterbody){
     if (missingSpool) notes.push(`лучей без снасти: ${missingSpool}`);
     if (missingCoords) notes.push(`без координат: ${missingCoords}`);
     if (missingAzimuth) notes.push(`лучей без направления: ${missingAzimuth}`);
+    status.innerHTML = `<div id="mapNotes"></div><div id="mapPkg"></div>`;
+    const notesBox = $("#mapNotes");
     const paintStatus = () => {
-      const hidden = map.getZoom() < nativeMin;
-      status.textContent = notes.concat(hidden ? ["батиметрия появится при увеличении"] : []).join(" · ");
+      const hidden = !missingPackage && map.getZoom() < nativeMin;
+      notesBox.textContent = notes.concat(hidden ? ["батиметрия появится при увеличении"] : []).join(" · ");
     };
     map.on("zoomend", paintStatus);
     paintStatus();
+    if (missingPackage){
+      const entry = catalogEntry(manifest.slug);
+      const size = entry && Number(entry.bathymetryBytes) > 0 ? Number(entry.bathymetryBytes) : 0;
+      $("#mapPkg").innerHTML = `<div class="tiny" style="margin-top:6px">Карта глубин не скачана${size ? " · " + esc(fmtMB(size)) : ""}</div>
+        <button class="btn sm ghost" id="mapGetPkg" style="margin-top:8px">Скачать карту глубин</button>`;
+      $("#mapGetPkg").onclick = event =>
+        runPackageDownload(missingPackage, size, event.currentTarget, () => render());
+    }
     setTimeout(() => map.invalidateSize(), 0);
   } catch(error){
     status.textContent = "Не удалось открыть локальный пакет: " + error.message;

@@ -576,8 +576,17 @@ async function publishRegistry(outputRoot, registry, generatedAt, serviceWorker)
     const relativeRoot = `${item.slug}/${item.release}`;
     const activePackage = path.join(outputRoot, relativeRoot);
     if (!await pathExists(activePackage)) throw new Error(`Active package ${relativeRoot} is missing`);
+    const manifest = await readJson(path.join(activePackage, "lake.json"), null);
+    if (!manifest) throw new Error(`Active package ${relativeRoot} has no manifest`);
+    // Батиметрию качает сам пользователь, поэтому в precache версии её нет: иначе
+    // обновление оболочки тянет все пакеты сразу и падает целиком (ADR-0013).
+    const onDemand = typeof manifest.bathymetry === "string" ? manifest.bathymetry : null;
+    if (onDemand) item.bathymetryBytes = (await stat(path.join(activePackage, onDemand))).size;
+    else delete item.bathymetryBytes;
     const packageFiles = await collectFiles(activePackage);
-    packageFiles.forEach(file => files.push(`${prefix}/${relativeRoot}/${file}`));
+    packageFiles.forEach(file => {
+      if (file !== onDemand) files.push(`${prefix}/${relativeRoot}/${file}`);
+    });
   }
   files.push(`${prefix}/precache/${release}.json`, `${prefix}/registry/${release}.json`);
   files.sort();
